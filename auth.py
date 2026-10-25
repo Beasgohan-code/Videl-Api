@@ -1,0 +1,1232 @@
+"""Videl-Api authentication with scopes, expiry, quotas, bearer tokens.
+
+Key model:
+- Key IDs are opaque UUIDs; keys stored as sha256 hash + prefix
+- Scopes: read, search, download, admin
+- Per-key rate limit override, expiry, daily/monthly request & byte quotas
+- Bearer tokens (vyt_) for WebView/Mini App short-lived access
+- Owner tokens (vown_) for full access
+- JSON file fallback + MongoDB backend
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+import secrets
+import time
+from datetime import datetime, timezone, timedelta
+from pathlib import Path
+from typing import Optional
+
+from fastapi import Header, HTTPException, status
+
+from config import settings
+
+KEYS_FILE = Path("api_keys.json")
+TOKENS_FILE = Path("bearer_tokens.json")
+QUOTA_FILE = Path("quota_ledger.json")
+
+# Scope hierarchy
+ALL_SCOPES = {"read", "search", "download", "admin"}
+SCOPE_HIERARCHY = {"read": 0, "search": 1, "download": 2, "admin": 3}
+
+
+def _now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _iso(dt: datetime) -> str:
+    return dt.isoformat()
+
+
+def _hash_key(key: str) -> str:
+    return hashlib.sha256(key.encode()).hexdigest()
+
+
+def _prefix_of(key: str) -> str:
+    return key[:8]
+
+
+def _make_key() -> str:
+    return settings.api_key_prefix + secrets.token_urlsafe(40)
+
+
+def _make_token(prefix: str) -> str:
+    return prefix + secrets.token_urlsafe(32)
+
+
+def _scope_ok(key_scopes: list[str], needed: str) -> bool:
+    if "admin" in key_scopes:
+        return True
+    needed_level = SCOPE_HIERARCHY.get(needed, 0)
+    for s in key_scopes:
+        if SCOPE_HIERARCHY.get(s, 0) >= needed_level:
+            return True
+    return False
+
+
+# ---------------------------------------------------------------------------
+# JSON file store (fallback)
+# ---------------------------------------------------------------------------
+
+def _load_json(path: Path, default):
+    if not path.exists():
+        return default
+    try:
+        return json.loads(path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return default
+
+
+def _save_json(path: Path, data) -> None:
+    path.write_text(json.dumps(data, indent=2, default=str), encoding="utf-8")
+
+
+# ---------------------------------------------------------------------------
+# MongoDB backend (optional)
+# ---------------------------------------------------------------------------
+
+_MONGO_KEYS = None
+_MONGO_QUOTAS = None
+_MONGO_OK = False
+
+
+def _mongo_keys():
+    global _MONGO_KEYS, _MONGO_OK
+    if _MONGO_OK is False:
+        return None
+    if _MONGO_KEYS is not None:
+        return _MONGO_KEYS
+    if not settings.api_keys_enabled:
+        return None
+    try:
+        from motor.motor_asyncio import AsyncIOMotorClient
+        client = AsyncIOMotorClient(
+            settings.mongodb_uri,
+            serverSelectionTimeoutMS=1000,
+            connectTimeoutMS=1000,
+        )
+        client.admin.command("ping")
+        _MONGO_KEYS = client[settings.mongodb_db]["api_keys"]
+        _MONGO_QUOTAS = client[settings.mongodb_db]["quota_ledger"]
+        _MONGO_OK = True
+        return _MONGO_KEYS
+    except Exception:
+        _MONGO_OK = False
+        _MONGO_KEYS = None
+        return None
+
+
+# ---------------------------------------------------------------------------
+# Key operations
+# ---------------------------------------------------------------------------
+
+def _empty_key_record(key_id: str, raw_key: str, owner_id: int, scopes: list[str],
+                      expires_at: Optional[datetime], rate_limit: Optional[int]) -> dict:
+    return {
+        "_id": key_id,
+        "key_prefix": _prefix_of(raw_key),
+        "key_hash": _hash_key(raw_key),
+        "owner_id": owner_id,
+        "scopes": scopes,
+        "active": True,
+        "created_at": _iso(_now()),
+        "expires_at": _iso(expires_at) if expires_at else None,
+        "rate_limit": rate_limit,
+        "last_used_at": None,
+        "usage_count": 0,
+        "daily_requests": 0,
+        "daily_requests_date": _now().strftime("%Y-%m-%d"),
+        "monthly_requests": 0,
+        "monthly_requests_month": _now().strftime("%Y-%m"),
+        "daily_bytes": 0,
+        "daily_bytes_date": _now().strftime("%Y-%m-%d"),
+        "monthly_bytes": 0,
+        "monthly_bytes_month": _now().strftime("%Y-%m"),
+    }
+
+
+async def _key_coll():
+    coll = _mongo_keys()
+    if coll is not None:
+        return coll, True
+    return None, False
+
+
+async def create_api_key(
+    owner_id: int = 0,
+    *,
+    scopes: Optional[list[str]] = None,
+    expires_in_days: Optional[int] = None,
+    rate_limit: Optional[int] = None,
+    label: Optional[str] = None,
+) -> dict:
+    scopes = scopes or ["read", "search", "download"]
+    raw_key = _make_key()
+    key_id = secrets.token_urlsafe(16)
+    expires_at = None
+    if expires_in_days:
+        expires_at = _now() + timedelta(days=expires_in_days)
+
+    record = _empty_key_record(key_id, raw_key, owner_id, scopes, expires_at, rate_limit)
+    if label:
+        record["label"] = label
+
+    coll, is_mongo = await _key_coll()
+    if is_mongo:
+        await coll.create_index("key_prefix", unique=True)
+        await coll.create_index("owner_id")
+        await coll.create_index("active")
+        await coll.insert_one(record)
+    else:
+        keys = _load_json(KEYS_FILE, [])
+        keys.append(record)
+        _save_json(KEYS_FILE, keys)
+
+    return {
+        "key": raw_key,
+        "key_id": key_id,
+        "owner_id": owner_id,
+        "scopes": scopes,
+        "active": True,
+        "expires_at": record["expires_at"],
+        "rate_limit": rate_limit,
+        "label": label,
+        "created_at": record["created_at"],
+    }
+
+
+async def validate_api_key(
+    x_api_key: str = Header(default="", alias="X-API-Key"),
+    x_owner_token: str = Header(default="", alias="X-Owner-Token"),
+) -> dict:
+    """Validate an API key or owner token. Returns the key record + auth context."""
+    if not settings.api_keys_enabled:
+        return {
+            "key": "open", "key_id": "open", "owner_id": 0,
+            "scopes": list(ALL_SCOPES), "active": True, "admin": True,
+            "auth_mode": "open",
+        }
+
+    # Owner token check (full access)
+    if x_owner_token and settings.admin_keys:
+        # Owner token is HMAC-signed; here we accept admin_keys as owner tokens too
+        if x_owner_token in settings.admin_keys:
+            return {
+                "key": "owner", "key_id": "owner", "owner_id": 0,
+                "scopes": list(ALL_SCOPES), "active": True, "admin": True,
+                "auth_mode": "owner",
+            }
+
+    if not x_api_key:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED, detail="Missing API key"
+        )
+
+    # Admin keys bypass
+    if settings.admin_keys and x_api_key in settings.admin_keys:
+        return {
+            "key": "admin", "key_id": "admin", "owner_id": 0,
+            "scopes": list(ALL_SCOPES), "active": True, "admin": True,
+            "auth_mode": "admin",
+        }
+
+    record = None
+    coll, is_mongo = await _key_coll()
+
+    if is_mongo:
+        try:
+            # Try by prefix then verify hash
+            prefix = _prefix_of(x_api_key)
+            record = await coll.find_one({"key_prefix": prefix})
+            if record and not _verify_key_hash(x_api_key, record):
+                record = None
+            if record:
+                await coll.update_one(
+                    {"_id": record["_id"]},
+                    {"$set": {"last_used_at": _iso(_now()), "usage_count": record.get("usage_count", 0) + 1}},
+                )
+        except Exception:
+            record = None
+
+    if record is None:
+        # JSON fallback
+        keys = _load_json(KEYS_FILE, [])
+        for rec in keys:
+            if rec.get("key_prefix") == _prefix_of(x_api_key) and _verify_key_hash(x_api_key, rec):
+                record = rec
+                break
+
+    if record is None:
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN, detail="Invalid API key"
+        )
+
+    if not record.get("active", True):
+        raise HTTPException(
+            status_code=status.HTTP_403_FORBIDDEN, detail="API key inactive"
+        )
+
+    # Expiry check
+    exp = record.get("expires_at")
+    if exp:
+        try:
+            if datetime.fromisoformat(exp) < _now():
+                raise HTTPException(
+                    status_code=status.HTTP_403_FORBIDDEN, detail="API key expired"
+                )
+        except ValueError:
+            pass
+
+    return {
+        "key": record.get("key_prefix", ""),
+        "key_id": record.get("_id", ""),
+        "owner_id": record.get("owner_id", 0),
+        "scopes": record.get("scopes", ["read"]),
+        "active": True,
+        "admin": "admin" in record.get("scopes", []),
+        "rate_limit": record.get("rate_limit"),
+        "label": record.get("label"),
+        "auth_mode": "key",
+        "_record": record,
+        "_is_mongo": is_mongo,
+        "_coll": coll,
+    }
+
+
+def _verify_key_hash(raw_key: str, record: dict) -> bool:
+    stored = record.get("key_hash", "")
+    return stored == _hash_key(raw_key)
+
+
+# ---------------------------------------------------------------------------
+# Quota / rate ledger
+# ---------------------------------------------------------------------------
+
+def _reset_quota_if_needed(record: dict) -> dict:
+    now = _now()
+    today = now.strftime("%Y-%m-%d")
+    month = now.strftime("%Y-%m")
+
+    if record.get("daily_requests_date") != today:
+        record["daily_requests"] = 0
+        record["daily_requests_date"] = today
+        record["daily_bytes"] = 0
+        record["daily_bytes_date"] = today
+
+    if record.get("monthly_requests_month") != month:
+        record["monthly_requests"] = 0
+        record["monthly_requests_month"] = month
+        record["monthly_bytes"] = 0
+        record["monthly_bytes_month"] = month
+
+    return record
+
+
+def check_quota(record: dict, requested_bytes: int = 0) -> Optional[str]:
+    """Return an error message if quota exceeded, else None."""
+    record = _reset_quota_if_needed(record)
+
+    daily_req_limit = settings.quota_daily_requests
+    monthly_req_limit = settings.quota_monthly_requests
+    daily_byte_limit = settings.quota_daily_bytes
+    monthly_byte_limit = settings.quota_monthly_bytes
+
+    # Per-key overrides
+    key_rate = record.get("rate_limit")
+
+    if daily_req_limit and record["daily_requests"] >= daily_req_limit:
+        return "Daily request quota exceeded"
+    if monthly_req_limit and record["monthly_requests"] >= monthly_req_limit:
+        return "Monthly request quota exceeded"
+    if daily_byte_limit and record["daily_bytes"] + requested_bytes > daily_byte_limit:
+        return "Daily byte quota exceeded"
+    if monthly_byte_limit and record["monthly_bytes"] + requested_bytes > monthly_byte_limit:
+        return "Monthly byte quota exceeded"
+
+    return None
+
+
+def consume_quota(record: dict, response_bytes: int = 0) -> dict:
+    record = _reset_quota_if_needed(record)
+    record["daily_requests"] = record.get("daily_requests", 0) + 1
+    record["monthly_requests"] = record.get("monthly_requests", 0) + 1
+    record["daily_bytes"] = record.get("daily_bytes", 0) + response_bytes
+    record["monthly_bytes"] = record.get("monthly_bytes", 0) + response_bytes
+    return record
+
+
+async def persist_quota(record: dict, is_mongo: bool, coll=None) -> None:
+    if is_mongo and coll is not None:
+        try:
+            await coll.update_one(
+                {"_id": record["_id"]},
+                {"$set": {
+                    "daily_requests": record.get("daily_requests", 0),
+                    "daily_requests_date": record.get("daily_requests_date"),
+                    "monthly_requests": record.get("monthly_requests", 0),
+                    "monthly_requests_month": record.get("monthly_requests_month"),
+                    "daily_bytes": record.get("daily_bytes", 0),
+                    "daily_bytes_date": record.get("daily_bytes_date"),
+                    "monthly_bytes": record.get("monthly_bytes", 0),
+                    "monthly_bytes_month": record.get("monthly_bytes_month"),
+                }},
+            )
+        except Exception:
+            pass
+    else:
+        keys = _load_json(KEYS_FILE, [])
+        for rec in keys:
+            if rec.get("_id") == record.get("_id"):
+                rec.update({
+                    "daily_requests": record.get("daily_requests", 0),
+                    "daily_requests_date": record.get("daily_requests_date"),
+                    "monthly_requests": record.get("monthly_requests", 0),
+                    "monthly_requests_month": record.get("monthly_requests_month"),
+                    "daily_bytes": record.get("daily_bytes", 0),
+                    "daily_bytes_date": record.get("daily_bytes_date"),
+                    "monthly_bytes": record.get("monthly_bytes", 0),
+                    "monthly_bytes_month": record.get("monthly_bytes_month"),
+                })
+                break
+        _save_json(KEYS_FILE, keys)
+
+
+async def list_api_keys(owner_id: int) -> list[dict]:
+    out = []
+    coll, is_mongo = await _key_coll()
+    if is_mongo:
+        try:
+            cursor = coll.find({"owner_id": owner_id}).sort("created_at", -1)
+            async for doc in cursor:
+                doc.pop("_id", None)
+                doc.pop("key_hash", None)
+                out.append(doc)
+            return out
+        except Exception:
+            pass
+    for rec in _load_json(KEYS_FILE, []):
+        if rec.get("owner_id") == owner_id:
+            rec.pop("key_hash", None)
+            out.append(rec)
+    return out
+
+
+async def revoke_api_key(owner_id: int, api_key: str) -> bool:
+    coll, is_mongo = await _key_coll()
+    if is_mongo:
+        try:
+            result = await coll.update_one(
+                {"owner_id": owner_id, "key_prefix": _prefix_of(api_key)},
+                {"$set": {"active": False, "revoked_at": _iso(_now())}},
+            )
+            return result.modified_count > 0
+        except Exception:
+            pass
+    keys = _load_json(KEYS_FILE, [])
+    changed = False
+    for rec in keys:
+        if rec.get("owner_id") == owner_id and rec.get("key_prefix") == _prefix_of(api_key):
+            rec["active"] = False
+            rec["revoked_at"] = _iso(_now())
+            changed = True
+    if changed:
+        _save_json(KEYS_FILE, keys)
+    return changed
+
+
+async def patch_api_key(
+    owner_id: int,
+    key_id: str,
+    *,
+    scopes: Optional[list[str]] = None,
+    active: Optional[bool] = None,
+    rate_limit: Optional[int] = None,
+    expires_in_days: Optional[int] = None,
+    label: Optional[str] = None,
+) -> Optional[dict]:
+    """Edit a key without rotating it."""
+    coll, is_mongo = await _key_coll()
+    updates = {}
+    if scopes is not None:
+        updates["scopes"] = scopes
+    if active is not None:
+        updates["active"] = active
+    if rate_limit is not None:
+        updates["rate_limit"] = rate_limit
+    if expires_in_days is not None:
+        updates["expires_at"] = _iso(_now() + timedelta(days=expires_in_days))
+    if label is not None:
+        updates["label"] = label
+
+    if is_mongo and coll is not None:
+        try:
+            result = await coll.update_one(
+                {"_id": key_id, "owner_id": owner_id},
+                {"$set": updates},
+            )
+            if result.modified_count > 0:
+                doc = await coll.find_one({"_id": key_id})
+                doc.pop("_id", None)
+                doc.pop("key_hash", None)
+                return doc
+            return None
+        except Exception:
+            return None
+    else:
+        keys = _load_json(KEYS_FILE, [])
+        for rec in keys:
+            if rec.get("_id") == key_id and rec.get("owner_id") == owner_id:
+                rec.update(updates)
+                _save_json(KEYS_FILE, keys)
+                rec.pop("key_hash", None)
+                return rec
+        return None
+
+
+async def rotate_api_key(owner_id: int, key_id: str) -> Optional[dict]:
+    """Rotate a key: invalidate old, issue new with same scopes/owner."""
+    coll, is_mongo = await _key_coll()
+    old = None
+    if is_mongo:
+        old = await coll.find_one({"_id": key_id, "owner_id": owner_id})
+    else:
+        for rec in _load_json(KEYS_FILE, []):
+            if rec.get("_id") == key_id and rec.get("owner_id") == owner_id:
+                old = rec
+                break
+    if not old:
+        return None
+
+    # Revoke old
+    await revoke_api_key(owner_id, old.get("key_hash", ""))
+
+    # Create new with same attributes
+    new = await create_api_key(
+        owner_id=owner_id,
+        scopes=old.get("scopes", ["read", "search", "download"]),
+        rate_limit=old.get("rate_limit"),
+        label=old.get("label"),
+    )
+    # Carry expiry if set
+    if old.get("expires_at"):
+        try:
+            exp = datetime.fromisoformat(old["expires_at"])
+            days = (exp - _now()).days
+            if days > 0:
+                new2 = await create_api_key(
+                    owner_id=owner_id,
+                    scopes=old.get("scopes", ["read", "search", "download"]),
+                    rate_limit=old.get("rate_limit"),
+                    expires_in_days=days,
+                    label=old.get("label"),
+                )
+                return new2
+        except ValueError:
+            pass
+    return new
+
+
+# ---------------------------------------------------------------------------
+# Bearer tokens (short-lived for WebView/Mini App)
+# ---------------------------------------------------------------------------
+
+def create_bearer_token(owner_id: int = 0, scopes: Optional[list[str]] = None, ttl_minutes: Optional[int] = None) -> dict:
+    scopes = scopes or ["read", "search", "download"]
+    ttl = ttl_minutes or settings.bearer_token_ttl_minutes
+    token = _make_token("vyt_")
+    expires_at = _now() + timedelta(minutes=ttl)
+    record = {
+        "token": token,
+        "token_hash": _hash_key(token),
+        "owner_id": owner_id,
+        "scopes": scopes,
+        "created_at": _iso(_now()),
+        "expires_at": _iso(expires_at),
+        "active": True,
+    }
+    tokens = _load_json(TOKENS_FILE, [])
+    tokens.append(record)
+    _save_json(TOKENS_FILE, tokens)
+    return {
+        "token": token,
+        "expires_in_seconds": ttl * 60,
+        "expires_at": record["expires_at"],
+        "scopes": scopes,
+    }
+
+
+def validate_bearer_token(token: str) -> Optional[dict]:
+    if not token.startswith("vyt_"):
+        return None
+    tokens = _load_json(TOKENS_FILE, [])
+    now = _now()
+    for rec in tokens:
+        if rec.get("token_hash") == _hash_key(token) and rec.get("active", True):
+            try:
+                if datetime.fromisoformat(rec["expires_at"]) < now:
+                    continue
+            except ValueError:
+                continue
+            return {
+                "token": rec.get("token", ""),
+                "owner_id": rec.get("owner_id", 0),
+                "scopes": rec.get("scopes", ["read"]),
+                "auth_mode": "bearer",
+            }
+    return None
+
+
+async def cleanup_expired_tokens() -> int:
+    tokens = _load_json(TOKENS_FILE, [])
+    now = _now()
+    changed = False
+    kept = []
+    for rec in tokens:
+        try:
+            if datetime.fromisoformat(rec["expires_at"]) < now:
+                rec["active"] = False
+                changed = True
+        except ValueError:
+            pass
+        kept.append(rec)
+    if changed:
+        _save_json(TOKENS_FILE, kept)
+    return len(tokens)
+
+
+# ============================================================================
+# USER MANAGEMENT
+# ============================================================================
+
+USERS_FILE = Path("users.json")
+TIERS_FILE = Path("tiers.json")
+PAYMENTS_FILE = Path("payments.json")
+PLAYLISTS_FILE = Path("playlists.json")
+WEBHOOKS_FILE = Path("webhooks.json")
+NOTIFICATIONS_FILE = Path("notifications.json")
+BATCHES_FILE = Path("batches.json")
+DEVICES_FILE = Path("devices.json")
+SESSIONS_FILE = Path("sessions.json")
+ALERTS_FILE = Path("alerts.json")
+ANALYTICS_FILE = Path("analytics.json")
+
+
+def _load_users() -> list[dict]:
+    return _load_json(USERS_FILE, [])
+
+
+def _save_users(users: list[dict]) -> None:
+    _save_json(USERS_FILE, users)
+
+
+def create_user(
+    telegram_id: Optional[int] = None,
+    username: Optional[str] = None,
+    first_name: Optional[str] = None,
+    tier: str = "free",
+    scopes: Optional[list[str]] = None,
+) -> dict:
+    scopes = scopes or ["read", "search"]
+    user_id = secrets.token_urlsafe(16)
+    user = {
+        "id": user_id,
+        "telegram_id": telegram_id,
+        "username": username,
+        "first_name": first_name,
+        "tier": tier,
+        "scopes": scopes,
+        "is_admin": False,
+        "is_owner": False,
+        "created_at": _iso(_now()),
+        "updated_at": _iso(_now()),
+        "daily_requests": 0,
+        "monthly_requests": 0,
+        "daily_bytes": 0,
+        "monthly_bytes": 0,
+        "language": "en",
+        "notifications": True,
+        "stars_balance": 0,
+        "lifetime_stars": 0,
+        "download_count": 0,
+        "search_count": 0,
+        "playlist_count": 0,
+    }
+    users = _load_users()
+    users.append(user)
+    _save_users(users)
+    return user
+
+
+def get_user(user_id: str) -> Optional[dict]:
+    for u in _load_users():
+        if u.get("id") == user_id:
+            return u
+    return None
+
+
+def get_user_by_telegram(telegram_id: int) -> Optional[dict]:
+    for u in _load_users():
+        if u.get("telegram_id") == telegram_id:
+            return u
+    return None
+
+
+def update_user(user_id: str, **kwargs) -> Optional[dict]:
+    users = _load_users()
+    for u in users:
+        if u.get("id") == user_id:
+            u.update(kwargs)
+            u["updated_at"] = _iso(_now())
+            _save_users(users)
+            return u
+    return None
+
+
+def delete_user(user_id: str) -> bool:
+    users = _load_users()
+    changed = False
+    kept = []
+    for u in users:
+        if u.get("id") == user_id:
+            changed = True
+        else:
+            kept.append(u)
+    if changed:
+        _save_users(kept)
+    return changed
+
+
+def list_users(limit: int = 100, offset: int = 0) -> list[dict]:
+    users = _load_users()
+    return users[offset:offset + limit]
+
+
+def set_user_tier(user_id: str, tier: str, scopes: Optional[list[str]] = None) -> Optional[dict]:
+    users = _load_users()
+    tier_scopes = scopes or {
+        "free": ["read", "search"],
+        "pro": ["read", "search", "download"],
+        "owner": ["read", "search", "download", "admin"],
+    }.get(tier, ["read", "search"])
+    for u in users:
+        if u.get("id") == user_id:
+            u["tier"] = tier
+            u["scopes"] = tier_scopes
+            u["is_admin"] = tier == "owner"
+            u["is_owner"] = tier == "owner"
+            u["updated_at"] = _iso(_now())
+            _save_users(users)
+            return u
+    return None
+
+
+def increment_user_counter(telegram_id: int, field: str, amount: int = 1) -> None:
+    users = _load_users()
+    for u in users:
+        if u.get("telegram_id") == telegram_id:
+            u[field] = u.get(field, 0) + amount
+            u["updated_at"] = _iso(_now())
+            break
+    _save_users(users)
+
+
+# ============================================================================
+# TIER INFO
+# ============================================================================
+
+TIER_DEFINITIONS = {
+    "free": {
+        "daily_limit": 100,
+        "monthly_limit": 1000,
+        "daily_bytes_limit": 100 * 1024 * 1024,
+        "monthly_bytes_limit": 1024 * 1024 * 1024,
+        "rate_limit": 100,
+        "scopes": ["read", "search"],
+    },
+    "pro": {
+        "daily_limit": 1000,
+        "monthly_limit": 30000,
+        "daily_bytes_limit": 1024 * 1024 * 1024,
+        "monthly_bytes_limit": 10 * 1024 * 1024 * 1024,
+        "rate_limit": 1000,
+        "scopes": ["read", "search", "download"],
+    },
+    "owner": {
+        "daily_limit": 0,
+        "monthly_limit": 0,
+        "daily_bytes_limit": 0,
+        "monthly_bytes_limit": 0,
+        "rate_limit": None,
+        "scopes": ["read", "search", "download", "admin"],
+    },
+}
+
+
+def get_tier_info(tier: str) -> dict:
+    return TIER_DEFINITIONS.get(tier, TIER_DEFINITIONS["free"])
+
+
+def list_tiers() -> list[dict]:
+    return [
+        {"tier": t, **info} for t, info in TIER_DEFINITIONS.items()
+    ]
+
+
+# ============================================================================
+# PAYMENTS / TELEGRAM STARS
+# ============================================================================
+
+def _load_payments() -> list[dict]:
+    return _load_json(PAYMENTS_FILE, [])
+
+
+def _save_payments(payments: list[dict]) -> None:
+    _save_json(PAYMENTS_FILE, payments)
+
+
+def create_payment(
+    user_id: int,
+    tier: str,
+    amount: int,
+    currency: str,
+    invoice_payload: str,
+) -> dict:
+    payment_id = secrets.token_urlsafe(16)
+    payment = {
+        "id": payment_id,
+        "user_id": user_id,
+        "tier": tier,
+        "amount": amount,
+        "currency": currency,
+        "invoice_payload": invoice_payload,
+        "status": "pending",
+        "created_at": _iso(_now()),
+        "completed_at": None,
+    }
+    payments = _load_payments()
+    payments.append(payment)
+    _save_payments(payments)
+    return payment
+
+
+def complete_payment(invoice_payload: str) -> Optional[dict]:
+    payments = _load_payments()
+    for p in payments:
+        if p.get("invoice_payload") == invoice_payload and p.get("status") == "pending":
+            p["status"] = "completed"
+            p["completed_at"] = _iso(_now())
+            # Upgrade user tier if applicable
+            if p.get("tier") in ("pro", "owner"):
+                user = get_user_by_telegram(p["user_id"])
+                if user:
+                    set_user_tier(user["id"], p["tier"])
+                    # Add stars balance
+                    users = _load_users()
+                    for u in users:
+                        if u.get("id") == user["id"]:
+                            u["stars_balance"] = u.get("stars_balance", 0) + p["amount"]
+                            u["lifetime_stars"] = u.get("lifetime_stars", 0) + p["amount"]
+                            break
+                    _save_users(users)
+            _save_payments(payments)
+            return p
+    return None
+
+
+def list_payments(user_id: Optional[int] = None) -> list[dict]:
+    payments = _load_payments()
+    if user_id is not None:
+        payments = [p for p in payments if p.get("user_id") == user_id]
+    return payments
+
+
+# ============================================================================
+# PLAYLISTS
+# ============================================================================
+
+def _load_playlists() -> list[dict]:
+    return _load_json(PLAYLISTS_FILE, [])
+
+
+def _save_playlists(playlists: list[dict]) -> None:
+    _save_json(PLAYLISTS_FILE, playlists)
+
+
+def create_playlist(owner_id: int, name: str, description: Optional[str] = None, is_public: bool = False) -> dict:
+    playlist_id = secrets.token_urlsafe(16)
+    playlist = {
+        "id": playlist_id,
+        "owner_id": owner_id,
+        "name": name,
+        "description": description,
+        "is_public": is_public,
+        "items": [],
+        "item_count": 0,
+        "created_at": _iso(_now()),
+        "updated_at": _iso(_now()),
+    }
+    playlists = _load_playlists()
+    playlists.append(playlist)
+    _save_playlists(playlists)
+    # Update user playlist count
+    users = _load_users()
+    for u in users:
+        if u.get("telegram_id") == owner_id:
+            u["playlist_count"] = u.get("playlist_count", 0) + 1
+            break
+    _save_users(users)
+    return playlist
+
+
+def get_playlist(playlist_id: str) -> Optional[dict]:
+    for p in _load_playlists():
+        if p.get("id") == playlist_id:
+            return p
+    return None
+
+
+def list_playlists(owner_id: Optional[int] = None) -> list[dict]:
+    playlists = _load_playlists()
+    if owner_id is not None:
+        playlists = [p for p in playlists if p.get("owner_id") == owner_id]
+    return playlists
+
+
+def update_playlist(playlist_id: str, **kwargs) -> Optional[dict]:
+    playlists = _load_playlists()
+    for p in playlists:
+        if p.get("id") == playlist_id:
+            p.update(kwargs)
+            p["updated_at"] = _iso(_now())
+            _save_playlists(playlists)
+            return p
+    return None
+
+
+def delete_playlist(playlist_id: str) -> bool:
+    playlists = _load_playlists()
+    changed = False
+    kept = []
+    for p in playlists:
+        if p.get("id") == playlist_id:
+            changed = True
+        else:
+            kept.append(p)
+    if changed:
+        _save_playlists(kept)
+    return changed
+
+
+def add_playlist_item(playlist_id: str, item: dict) -> Optional[dict]:
+    playlists = _load_playlists()
+    for p in playlists:
+        if p.get("id") == playlist_id:
+            if p.get("item_count", 0) >= 200:
+                return None
+            item["id"] = secrets.token_urlsafe(8)
+            item["position"] = p.get("item_count", 0)
+            item["added_at"] = _iso(_now())
+            p.setdefault("items", []).append(item)
+            p["item_count"] = len(p["items"])
+            p["updated_at"] = _iso(_now())
+            _save_playlists(playlists)
+            return item
+    return None
+
+
+def remove_playlist_item(playlist_id: str, item_id: str) -> bool:
+    playlists = _load_playlists()
+    for p in playlists:
+        if p.get("id") == playlist_id:
+            items = p.get("items", [])
+            kept = [it for it in items if it.get("id") != item_id]
+            if len(kept) != len(items):
+                p["items"] = kept
+                p["item_count"] = len(kept)
+                p["updated_at"] = _iso(_now())
+                _save_playlists(playlists)
+                return True
+    return False
+
+
+# ============================================================================
+# WEBHOOKS
+# ============================================================================
+
+def _load_webhooks() -> list[dict]:
+    return _load_json(WEBHOOKS_FILE, [])
+
+
+def _save_webhooks(webhooks: list[dict]) -> None:
+    _save_json(WEBHOOKS_FILE, webhooks)
+
+
+def create_webhook(url: str, events: list[str], secret: Optional[str] = None) -> dict:
+    webhook_id = secrets.token_urlsafe(16)
+    webhook = {
+        "id": webhook_id,
+        "url": url,
+        "events": events,
+        "secret": secret,
+        "active": True,
+        "created_at": _iso(_now()),
+        "last_triggered": None,
+        "trigger_count": 0,
+    }
+    hooks = _load_webhooks()
+    hooks.append(webhook)
+    _save_webhooks(hooks)
+    return webhook
+
+
+def list_webhooks() -> list[dict]:
+    return _load_webhooks()
+
+
+def delete_webhook(webhook_id: str) -> bool:
+    hooks = _load_webhooks()
+    changed = False
+    kept = []
+    for h in hooks:
+        if h.get("id") == webhook_id:
+            changed = True
+        else:
+            kept.append(h)
+    if changed:
+        _save_webhooks(kept)
+    return changed
+
+
+def trigger_webhook(event: str, payload: dict) -> None:
+    """Trigger webhooks matching an event (fire-and-forget)."""
+    hooks = _load_webhooks()
+    import asyncio
+    import aiohttp
+
+    async def _fire():
+        for h in hooks:
+            if not h.get("active", True):
+                continue
+            if event not in h.get("events", []):
+                continue
+            try:
+                headers = {"Content-Type": "application/json"}
+                if h.get("secret"):
+                    headers["X-Webhook-Secret"] = h["secret"]
+                async with aiohttp.ClientSession() as session:
+                    await session.post(h["url"], json=payload, headers=headers, timeout=10)
+                h["trigger_count"] = h.get("trigger_count", 0) + 1
+                h["last_triggered"] = _iso(_now())
+            except Exception:
+                pass
+        _save_webhooks(hooks)
+
+    try:
+        asyncio.create_task(_fire())
+    except RuntimeError:
+        asyncio.run(_fire())
+
+
+# ============================================================================
+# NOTIFICATIONS
+# ============================================================================
+
+def _load_notifications() -> list[dict]:
+    return _load_json(NOTIFICATIONS_FILE, [])
+
+
+def _save_notifications(notifications: list[dict]) -> None:
+    _save_json(NOTIFICATIONS_FILE, notifications)
+
+
+def create_notification(
+    user_id: int,
+    title: str,
+    message: str,
+    type: str = "info",
+) -> dict:
+    notif_id = secrets.token_urlsafe(16)
+    notif = {
+        "id": notif_id,
+        "user_id": user_id,
+        "title": title,
+        "message": message,
+        "type": type,
+        "read": False,
+        "created_at": _iso(_now()),
+    }
+    notifs = _load_notifications()
+    notifs.append(notif)
+    _save_notifications(notifs)
+    return notif
+
+
+def list_notifications(user_id: int, unread_only: bool = False) -> list[dict]:
+    notifs = _load_notifications()
+    notifs = [n for n in notifs if n.get("user_id") == user_id]
+    if unread_only:
+        notifs = [n for n in notifs if not n.get("read", False)]
+    return notifs
+
+
+def mark_notification_read(notif_id: str, user_id: int) -> bool:
+    notifs = _load_notifications()
+    for n in notifs:
+        if n.get("id") == notif_id and n.get("user_id") == user_id:
+            n["read"] = True
+            _save_notifications(notifs)
+            return True
+    return False
+
+
+# ============================================================================
+# BATCH OPERATIONS
+# ============================================================================
+
+def _load_batches() -> list[dict]:
+    return _load_json(BATCHES_FILE, [])
+
+
+def _save_batches(batches: list[dict]) -> None:
+    _save_json(BATCHES_FILE, batches)
+
+
+def create_batch(total_items: int) -> str:
+    batch_id = secrets.token_urlsafe(16)
+    batch = {
+        "id": batch_id,
+        "status": "queued",
+        "total_items": total_items,
+        "completed_items": 0,
+        "results": [],
+        "error": None,
+        "created_at": _iso(_now()),
+        "updated_at": _iso(_now()),
+    }
+    batches = _load_batches()
+    batches.append(batch)
+    _save_batches(batches)
+    return batch_id
+
+
+def get_batch(batch_id: str) -> Optional[dict]:
+    for b in _load_batches():
+        if b.get("id") == batch_id:
+            return b
+    return None
+
+
+def update_batch(batch_id: str, **kwargs) -> Optional[dict]:
+    batches = _load_batches()
+    for b in batches:
+        if b.get("id") == batch_id:
+            b.update(kwargs)
+            b["updated_at"] = _iso(_now())
+            _save_batches(batches)
+            return b
+    return None
+
+
+# ============================================================================
+# DEVICES / SESSIONS
+# ============================================================================
+
+def _load_devices() -> list[dict]:
+    return _load_json(DEVICES_FILE, [])
+
+
+def _save_devices(devices: list[dict]) -> None:
+    _save_json(DEVICES_FILE, devices)
+
+
+def register_device(user_id: int, device_id: str, device_name: str, platform: str) -> dict:
+    dev_id = secrets.token_urlsafe(16)
+    device = {
+        "id": dev_id,
+        "user_id": user_id,
+        "device_id": device_id,
+        "device_name": device_name,
+        "platform": platform,
+        "last_active": _iso(_now()),
+        "active": True,
+    }
+    devices = _load_devices()
+    # Deactivate old devices with same device_id
+    for d in devices:
+        if d.get("device_id") == device_id:
+            d["active"] = False
+    devices.append(device)
+    _save_devices(devices)
+    return device
+
+
+def list_devices(user_id: int) -> list[dict]:
+    return [d for d in _load_devices() if d.get("user_id") == user_id and d.get("active", True)]
+
+
+# ============================================================================
+# ALERTS
+# ============================================================================
+
+def _load_alerts() -> list[dict]:
+    return _load_json(ALERTS_FILE, [])
+
+
+def _save_alerts(alerts: list[dict]) -> None:
+    _save_json(ALERTS_FILE, alerts)
+
+
+def create_alert(name: str, condition: str, threshold: float, action: str) -> dict:
+    alert_id = secrets.token_urlsafe(16)
+    alert = {
+        "id": alert_id,
+        "name": name,
+        "condition": condition,
+        "threshold": threshold,
+        "action": action,
+        "active": True,
+        "created_at": _iso(_now()),
+    }
+    alerts = _load_alerts()
+    alerts.append(alert)
+    _save_alerts(alerts)
+    return alert
+
+
+def list_alerts() -> list[dict]:
+    return _load_alerts()
+
+
+# ============================================================================
+# ANALYTICS
+# ============================================================================
+
+def _load_analytics() -> list[dict]:
+    return _load_json(ANALYTICS_FILE, [])
+
+
+def _save_analytics(data: list[dict]) -> None:
+    _save_json(ANALYTICS_FILE, data)
+
+
+def record_analytics(event: str, data: dict) -> None:
+    entry = {
+        "event": event,
+        "data": data,
+        "timestamp": _iso(_now()),
+    }
+    analytics = _load_analytics()
+    analytics.append(entry)
+    # Retention: keep last 10000 entries
+    if len(analytics) > 10000:
+        analytics = analytics[-10000:]
+    _save_analytics(analytics)
+
+
+def get_analytics(event: Optional[str] = None) -> list[dict]:
+    analytics = _load_analytics()
+    if event:
+        analytics = [a for a in analytics if a.get("event") == event]
+    return analytics
