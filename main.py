@@ -40,6 +40,7 @@ Endpoints:
 from __future__ import annotations
 
 import asyncio
+import os
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -52,7 +53,7 @@ from starlette.background import BackgroundTask
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import FileResponse, RedirectResponse
 
-from auth import create_api_key, list_api_keys, revoke_api_key, validate_api_key
+from auth import create_api_key, list_api_keys, revoke_api_key, validate_api_key, _load_json, _save_json, KEYS_FILE
 from config import settings, list_sources, MUSIC_SOURCES
 from downloader import (
     cleanup_stale_downloads, download_audio, embed_metadata, enqueue_download,
@@ -640,7 +641,11 @@ async def stream_redirect(url: str, source: Optional[str] = None, _: dict = Depe
 @app.post("/v1/keys", tags=["keys"])
 async def create_key(owner_id: int = 0):
     record = await create_api_key(owner_id)
-    return {"key": record.key, "owner_id": record.owner_id, "active": record.active}
+    return {
+        "key": record.get("key", "") if isinstance(record, dict) else record.key,
+        "owner_id": record.get("owner_id", 0) if isinstance(record, dict) else record.owner_id,
+        "active": record.get("active", True) if isinstance(record, dict) else record.active,
+    }
 
 
 @app.get("/v1/keys", tags=["keys"])
@@ -904,3 +909,461 @@ async def aria2_remove_download(gid: str, _: dict = Depends(get_auth)):
     if not ok:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Download not found")
     return {"removed": True, "gid": gid}
+
+
+# ============================================================================
+# TELEGRAM WEBAPP — API Key Creation & Management
+# ============================================================================
+
+from pydantic import BaseModel, Field
+from typing import Any
+
+# --- WebApp Request/Response Models ---
+
+class TelegramAuthRequest(BaseModel):
+    init_data: str = Field(..., description="Telegram WebApp initData string")
+
+
+class TelegramAuthResponse(BaseModel):
+    ok: bool
+    user: dict
+    token: str | None = None
+    expires_in: int | None = None
+
+
+class KeyCreateRequest(BaseModel):
+    tier: str = Field(default="free", description="free|pro|owner")
+    label: str | None = None
+    scopes: list[str] = Field(default_factory=lambda: ["read", "search"])
+    expires_in_days: int | None = None
+
+
+class KeyCreateResponse(BaseModel):
+    ok: bool
+    key: str | None = None
+    key_id: str | None = None
+    tier: str
+    scopes: list[str]
+    rate_limit: int | None = None
+    daily_limit: int
+    monthly_limit: int
+    daily_bytes: int
+    monthly_bytes: int
+    expires_at: str | None = None
+    error: str | None = None
+
+
+class KeyInfoResponse(BaseModel):
+    ok: bool
+    key_id: str
+    key_prefix: str
+    tier: str
+    scopes: list[str]
+    active: bool
+    rate_limit: int | None = None
+    daily_requests: int
+    monthly_requests: int
+    daily_bytes: int
+    monthly_bytes: int
+    expires_at: str | None = None
+    created_at: str
+
+
+class KeyListResponse(BaseModel):
+    ok: bool
+    keys: list[dict]
+
+
+class StatsResponse(BaseModel):
+    ok: bool
+    requests_today: int
+    requests_month: int
+    bytes_today: int
+    bytes_month: int
+    key_status: str
+
+
+# --- Telegram WebApp initData verification ---
+
+def _parse_init_data(init_data: str) -> dict:
+    """Parse Telegram WebApp initData into a dict."""
+    from urllib.parse import parse_qs, unquote
+    parsed = parse_qs(init_data)
+    result = {}
+    for key, values in parsed.items():
+        result[key] = unquote(values[0]) if values else ""
+    return result
+
+
+def _verify_telegram_signature(init_data: str, bot_token: str) -> bool:
+    """Verify Telegram WebApp initData signature (HMAC-SHA256)."""
+    import hmac
+    import hashlib
+
+    try:
+        parsed = _parse_init_data(init_data)
+    except Exception:
+        return False
+
+    received_hash = parsed.get("hash", "")
+    if not received_hash:
+        return False
+
+    # Build data-check-string
+    data_check_parts = []
+    for key in sorted(parsed.keys()):
+        if key != "hash":
+            data_check_parts.append(f"{key}={parsed[key]}")
+    data_check_string = "\n".join(data_check_parts)
+
+    # Secret key = HMAC-SHA256(bot_token, "WebAppData")
+    secret_key = hmac.new(b"WebAppData", bot_token.encode(), hashlib.sha256).digest()
+
+    # Compute hash
+    computed_hash = hmac.new(secret_key, data_check_string.encode(), hashlib.sha256).hexdigest()
+
+    return hmac.compare_digest(computed_hash, received_hash)
+
+
+def _extract_telegram_user(init_data: str) -> dict | None:
+    """Extract user object from initData."""
+    try:
+        parsed = _parse_init_data(init_data)
+        user_str = parsed.get("user", "")
+        if not user_str:
+            return None
+        import json
+        return json.loads(user_str)
+    except Exception:
+        return None
+
+
+# --- WebApp Routes ---
+
+@app.post("/v1/web/auth/telegram", response_model=TelegramAuthResponse, tags=["webapp"])
+async def web_auth_telegram(payload: TelegramAuthRequest):
+    """Verify Telegram WebApp auth and return session info."""
+    init_data = payload.init_data
+
+    # Verify signature if bot token is configured
+    bot_token = os.getenv("TELEGRAM_BOT_TOKEN", "")
+    if bot_token:
+        if not _verify_telegram_signature(init_data, bot_token):
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid Telegram signature",
+            )
+
+    user = _extract_telegram_user(init_data)
+    if not user:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Cannot extract Telegram user",
+        )
+
+    telegram_id = user.get("id")
+    username = user.get("username", "")
+    first_name = user.get("first_name", "")
+
+    # Ensure user has a free tier key if none exists
+    from auth import _load_json, KEYS_FILE, _save_json
+    existing_keys = _load_json(KEYS_FILE, [])
+    user_keys = [k for k in existing_keys if k.get("telegram_id") == telegram_id and k.get("active", True)]
+
+    if not user_keys:
+        # Create a default free key
+        from auth import create_api_key
+        key_data = await create_api_key(
+            owner_id=telegram_id,
+            scopes=["read", "search"],
+            label=f"Telegram: {first_name} (@{username})",
+            rate_limit=100,
+        )
+        # Mark as telegram-linked
+        key_data["telegram_id"] = telegram_id
+        keys = _load_json(KEYS_FILE, [])
+        for k in keys:
+            if k.get("_id") == key_data["key_id"]:
+                k["telegram_id"] = telegram_id
+                k["username"] = username
+                k["first_name"] = first_name
+                break
+        _save_json(KEYS_FILE, keys)
+
+    return TelegramAuthResponse(
+        ok=True,
+        user=user,
+        token=f"vyt_{telegram_id}",
+        expires_in=900,
+    )
+
+
+@app.post("/v1/web/keys/create", response_model=KeyCreateResponse, tags=["webapp"])
+async def web_create_key(payload: KeyCreateRequest, auth: dict = Depends(validate_api_key)):
+    """Create a new API key via WebApp."""
+    tier_limits = {
+        "free": {"daily": 100, "monthly": 1000, "daily_bytes": 100*1024*1024, "monthly_bytes": 1*1024*1024*1024, "rate": 100, "scopes": ["read", "search"]},
+        "pro": {"daily": 1000, "monthly": 30000, "daily_bytes": 1024*1024*1024, "monthly_bytes": 10*1024*1024*1024, "rate": 1000, "scopes": ["read", "search", "download"]},
+        "owner": {"daily": 0, "monthly": 0, "daily_bytes": 0, "monthly_bytes": 0, "rate": None, "scopes": ["read", "search", "download", "admin"]},
+    }
+
+    tier = payload.tier.lower()
+    if tier not in tier_limits:
+        raise HTTPException(status_code=400, detail="Invalid tier")
+
+    limits = tier_limits[tier]
+    scopes = payload.scopes or limits["scopes"]
+
+    # Owner tier requires admin scope or existing owner
+    if tier == "owner" and not auth.get("admin", False):
+        raise HTTPException(status_code=403, detail="Owner tier requires admin privileges")
+
+    try:
+        key_data = await create_api_key(
+            owner_id=auth.get("owner_id", 0),
+            scopes=scopes,
+            expires_in_days=payload.expires_in_days,
+            rate_limit=limits["rate"] if limits["rate"] else None,
+            label=payload.label or f"WebApp {tier} key",
+        )
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Failed to create key: {exc}")
+
+    # Attach telegram info if available
+    keys = _load_json(KEYS_FILE, [])
+    for k in keys:
+        if k.get("_id") == key_data["key_id"]:
+            k["tier"] = tier
+            k["daily_limit"] = limits["daily"]
+            k["monthly_limit"] = limits["monthly"]
+            k["daily_bytes_limit"] = limits["daily_bytes"]
+            k["monthly_bytes_limit"] = limits["monthly_bytes"]
+            if auth.get("auth_mode") == "bearer" and "telegram_id" in auth:
+                k["telegram_id"] = auth.get("telegram_id")
+            break
+    _save_json(KEYS_FILE, keys)
+
+    return KeyCreateResponse(
+        ok=True,
+        key=key_data["key"],
+        key_id=key_data["key_id"],
+        tier=tier,
+        scopes=scopes,
+        rate_limit=limits["rate"],
+        daily_limit=limits["daily"],
+        monthly_limit=limits["monthly"],
+        daily_bytes=limits["daily_bytes"],
+        monthly_bytes=limits["monthly_bytes"],
+        expires_at=key_data.get("expires_at"),
+    )
+
+
+@app.get("/v1/web/keys/list", response_model=KeyListResponse, tags=["webapp"])
+async def web_list_keys(auth: dict = Depends(validate_api_key)):
+    """List API keys for the authenticated user."""
+    from auth import list_api_keys, _load_json, KEYS_FILE
+
+    owner_id = auth.get("owner_id", 0)
+
+    # Owner can see all keys
+    if auth.get("admin", False):
+        keys = _load_json(KEYS_FILE, [])
+    else:
+        keys = await list_api_keys(owner_id)
+
+    # Clean sensitive fields
+    clean_keys = []
+    for k in keys:
+        clean_keys.append({
+            "key_id": k.get("_id", ""),
+            "key_prefix": k.get("key_prefix", ""),
+            "tier": k.get("tier", "free"),
+            "scopes": k.get("scopes", []),
+            "active": k.get("active", True),
+            "label": k.get("label", ""),
+            "rate_limit": k.get("rate_limit"),
+            "daily_limit": k.get("daily_limit", 0),
+            "monthly_limit": k.get("monthly_limit", 0),
+            "daily_requests": k.get("daily_requests", 0),
+            "monthly_requests": k.get("monthly_requests", 0),
+            "daily_bytes": k.get("daily_bytes", 0),
+            "monthly_bytes": k.get("monthly_bytes", 0),
+            "expires_at": k.get("expires_at"),
+            "created_at": k.get("created_at", ""),
+            "username": k.get("username", ""),
+            "first_name": k.get("first_name", ""),
+        })
+
+    return KeyListResponse(ok=True, keys=clean_keys)
+
+
+@app.get("/v1/web/keys/{key_id}", response_model=KeyInfoResponse, tags=["webapp"])
+async def web_key_info(key_id: str, auth: dict = Depends(validate_api_key)):
+    """Get detailed info about a specific key."""
+    from auth import _load_json, KEYS_FILE
+
+    keys = _load_json(KEYS_FILE, [])
+    key = None
+    for k in keys:
+        if k.get("_id") == key_id:
+            key = k
+            break
+
+    if not key:
+        raise HTTPException(status_code=404, detail="Key not found")
+
+    # Check access
+    if not auth.get("admin", False) and key.get("owner_id") != auth.get("owner_id", 0):
+        raise HTTPException(status_code=403, detail="Access denied")
+
+    return KeyInfoResponse(
+        ok=True,
+        key_id=key.get("_id", ""),
+        key_prefix=key.get("key_prefix", ""),
+        tier=key.get("tier", "free"),
+        scopes=key.get("scopes", []),
+        active=key.get("active", True),
+        rate_limit=key.get("rate_limit"),
+        daily_requests=key.get("daily_requests", 0),
+        monthly_requests=key.get("monthly_requests", 0),
+        daily_bytes=key.get("daily_bytes", 0),
+        monthly_bytes=key.get("monthly_bytes", 0),
+        expires_at=key.get("expires_at"),
+        created_at=key.get("created_at", ""),
+    )
+
+
+@app.delete("/v1/web/keys/{key_id}", tags=["webapp"])
+async def web_revoke_key(key_id: str, auth: dict = Depends(validate_api_key)):
+    """Revoke an API key."""
+    from auth import _load_json, KEYS_FILE, _save_json, revoke_api_key
+
+    keys = _load_json(KEYS_FILE, [])
+    key = None
+    for k in keys:
+        if k.get("_id") == key_id:
+            key = k
+            break
+
+    if not key:
+        raise HTTPException(status_code=404, detail="Key not found")
+
+    if not auth.get("admin", False) and key.get("owner_id") != auth.get("owner_id", 0):
+        raise HTTPException(status_code=403, detail="Access denied")
+
+    # Use raw key hash for revoke lookup
+    await revoke_api_key(key.get("owner_id", 0), key.get("key_hash", ""))
+    return {"ok": True, "revoked": True, "key_id": key_id}
+
+
+@app.patch("/v1/web/keys/{key_id}", tags=["webapp"])
+async def web_patch_key(key_id: str, payload: dict, auth: dict = Depends(validate_api_key)):
+    """Update a key (owner only)."""
+    from auth import patch_api_key, rotate_api_key
+
+    if not auth.get("admin", False):
+        raise HTTPException(status_code=403, detail="Owner access required")
+
+    action = payload.get("action", "patch")
+
+    if action == "rotate":
+        result = await rotate_api_key(auth.get("owner_id", 0), key_id)
+        if not result:
+            raise HTTPException(status_code=404, detail="Key not found")
+        return {"ok": True, "action": "rotated", "new_key": result.get("key"), "key_id": key_id}
+    else:
+        result = await patch_api_key(
+            auth.get("owner_id", 0),
+            key_id,
+            scopes=payload.get("scopes"),
+            active=payload.get("active"),
+            rate_limit=payload.get("rate_limit"),
+            expires_in_days=payload.get("expires_in_days"),
+            label=payload.get("label"),
+        )
+        if not result:
+            raise HTTPException(status_code=404, detail="Key not found")
+        return {"ok": True, "action": "patched", "key": result}
+
+
+@app.get("/v1/web/stats", response_model=StatsResponse, tags=["webapp"])
+async def web_stats(auth: dict = Depends(validate_api_key)):
+    """Get usage statistics for the authenticated user."""
+    from auth import _load_json, KEYS_FILE
+
+    owner_id = auth.get("owner_id", 0)
+    keys = _load_json(KEYS_FILE, [])
+
+    user_keys = [k for k in keys if k.get("owner_id") == owner_id] if not auth.get("admin", False) else keys
+
+    requests_today = sum(k.get("daily_requests", 0) for k in user_keys)
+    requests_month = sum(k.get("monthly_requests", 0) for k in user_keys)
+    bytes_today = sum(k.get("daily_bytes", 0) for k in user_keys)
+    bytes_month = sum(k.get("monthly_bytes", 0) for k in user_keys)
+
+    # Determine overall status
+    active_keys = [k for k in user_keys if k.get("active", True)]
+    key_status = "active" if active_keys else "inactive"
+
+    return StatsResponse(
+        ok=True,
+        requests_today=requests_today,
+        requests_month=requests_month,
+        bytes_today=bytes_today,
+        bytes_month=bytes_month,
+        key_status=key_status,
+    )
+
+
+@app.get("/v1/web/owner/keys", tags=["webapp"])
+async def web_owner_keys(auth: dict = Depends(validate_api_key)):
+    """List ALL keys (owner only)."""
+    if not auth.get("admin", False):
+        raise HTTPException(status_code=403, detail="Owner access required")
+
+    from auth import _load_json, KEYS_FILE
+    keys = _load_json(KEYS_FILE, [])
+
+    clean_keys = []
+    for k in keys:
+        clean_keys.append({
+            "key_id": k.get("_id", ""),
+            "key_prefix": k.get("key_prefix", ""),
+            "owner_id": k.get("owner_id", 0),
+            "tier": k.get("tier", "free"),
+            "scopes": k.get("scopes", []),
+            "active": k.get("active", True),
+            "label": k.get("label", ""),
+            "username": k.get("username", ""),
+            "first_name": k.get("first_name", ""),
+            "daily_requests": k.get("daily_requests", 0),
+            "monthly_requests": k.get("monthly_requests", 0),
+            "expires_at": k.get("expires_at"),
+        })
+
+    return {"ok": True, "keys": clean_keys, "total": len(clean_keys)}
+
+
+# --- WebApp static file serving ---
+from fastapi.responses import FileResponse
+import os as _os
+
+WEBAPP_DIR = _os.path.join(_os.path.dirname(__file__), "webapp")
+
+
+@app.get("/app", tags=["webapp"])
+async def webapp_index():
+    """Serve the Telegram WebApp entry point."""
+    index_path = _os.path.join(WEBAPP_DIR, "index.html")
+    if _os.path.exists(index_path):
+        return FileResponse(index_path)
+    return {"message": "WebApp not built. See webapp/ directory."}
+
+
+@app.get("/app/{path:path}", tags=["webapp"])
+async def webapp_static(path: str):
+    """Serve WebApp static assets."""
+    file_path = _os.path.join(WEBAPP_DIR, path)
+    if _os.path.exists(file_path) and _os.path.isfile(file_path):
+        return FileResponse(file_path)
+    raise HTTPException(status_code=404, detail="File not found")
