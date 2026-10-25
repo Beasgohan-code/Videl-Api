@@ -1,3 +1,0 @@
-# Example proxy list for local testing.
-# Add one proxy per line, for example:
-# http://127.0.0.1:8080

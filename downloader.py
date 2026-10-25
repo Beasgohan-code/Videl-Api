@@ -2,8 +2,8 @@
 
 Features:
 - yt-dlp info extraction & download across 1000+ sites
-- aria2c external downloader (multipart, faster downloads)
-- spotdl subprocess for Spotify metadata + audio matching
+- External downloader support for multipart segmented downloads
+- Subprocess integration for Spotify metadata + audio matching
 - Lyrics extraction (synced, genius, musixmatch, azlyrics)
 - Metadata embedding (ID3, album art, ISRC, etc.) via mutagen
 - SponsorBlock chapter removal
@@ -151,7 +151,7 @@ def _build_ydl_opts(
     if proxy:
         opts["proxy"] = proxy
 
-    # --- aria2c external downloader (multipart, faster) ---
+    # --- External downloader (multipart, faster) ---
     if use_aria2c and _has_aria2c():
         opts["external_downloader"] = "aria2c"
         opts["external_downloader_args"] = settings.aria2c_args.split()
@@ -384,7 +384,7 @@ def search_sync(
 
 
 # ---------------------------------------------------------------------------
-# spotdl integration (Spotify metadata + audio from YouTube/SoundCloud/etc.)
+# Subprocess integration for Spotify metadata
 # ---------------------------------------------------------------------------
 
 def _spotdl_available() -> bool:

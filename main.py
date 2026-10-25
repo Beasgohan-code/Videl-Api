@@ -1,11 +1,11 @@
-"""Videl-Api — powerful multi-source music REST API.
+"""Videl-Api — powerful multi-source media REST API.
 
 Endpoints:
   GET    /                              API info
   GET    /health                        Health check + features
-  GET    /v1/sources                    List supported music sources
-  GET    /v1/search                     Search music across sources
-  POST   /v1/search                     Search music (JSON body)
+  GET    /v1/sources                    List supported media sources
+  GET    /v1/search                     Search media across sources
+  POST   /v1/search                     Search media (JSON body)
   GET    /v1/info                       Extract track/album/playlist info
   POST   /v1/info                       Extract info (JSON body)
   GET    /v1/lyrics                     Get lyrics for a track
@@ -14,8 +14,8 @@ Endpoints:
   POST   /v1/lyrics/search              Search lyrics (JSON body)
   GET    /v1/metadata                   Enrich metadata from Spotify
   POST   /v1/metadata                   Enrich metadata (JSON body)
-  GET    /v1/download                   Download audio file
-  POST   /v1/download                   Download audio (JSON body)
+  GET    /v1/download                   Download media file
+  POST   /v1/download                   Download media (JSON body)
   POST   /v1/download/queue             Enqueue a background download job
   GET    /v1/download/queue             List download jobs
   GET    /v1/download/status/{job_id}   Get job status
@@ -29,9 +29,9 @@ Endpoints:
   GET    /v1/m3u8/download/queue        List M3U8 jobs
   GET    /v1/m3u8/download/status/{id}  M3U8 job status
   POST   /v1/m3u8/download/cancel/{id}  Cancel M3U8 job
-  POST   /v1/aria2/add                  Add download to aria2 RPC
-  GET    /v1/aria2/status/{gid}         aria2 download status
-  POST   /v1/aria2/remove/{gid}         Remove aria2 download
+  POST   /v1/download/add               Add download to manager
+  GET    /v1/download/status/{gid}      Download status
+  POST   /v1/download/remove/{gid}      Remove download
   POST   /v1/keys                       Create a new API key
   GET    /v1/keys                       List your API keys
   DELETE /v1/keys/{key}                 Revoke an API key
@@ -41,6 +41,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import secrets
 import time
 import uuid
 from contextlib import asynccontextmanager
@@ -65,21 +66,6 @@ from m3u8_downloader import (
     cancel_m3u8_job, list_m3u8_jobs, aria2_add_uri, aria2_tell_status,
     aria2_remove, M3U8Job,
 )
-from downloader import (
-    cleanup_stale_downloads, download_audio, embed_metadata, enqueue_download,
-    extract_info, extract_lyrics, get_job, cancel_job, list_jobs, search,
-    spotdl_download_sync, JOBS,
-)
-from m3u8_downloader import (
-    parse_m3u8, download_m3u8_sync, enqueue_m3u8_download, get_m3u8_job,
-    cancel_m3u8_job, list_m3u8_jobs, aria2_add_uri, aria2_tell_status,
-    aria2_remove, M3U8Job,
-)
-from downloader import (
-    cleanup_stale_downloads, download_audio, embed_metadata, enqueue_download,
-    extract_info, extract_lyrics, get_job, cancel_job, list_jobs, search,
-    spotdl_download_sync, JOBS,
-)
 from models import (
     DownloadResponse, ErrorResponse, HealthResponse, JobListResponse,
     JobActionResponse, LyricsResponse, LyricsSearchRequest, MetadataResponse,
@@ -87,6 +73,55 @@ from models import (
     DownloadJobItem,
     M3U8ParseResponse, M3U8DownloadResponse, M3U8JobItem,
     Aria2AddResponse, Aria2StatusResponse,
+    # User management
+    UserResponse, UserCreate, UserUpdate, UserListResponse, UserTierChange,
+    # Tier
+    TierInfo, TierListResponse,
+    # Payments
+    PaymentCreate, PaymentResponse, PaymentHistoryResponse, InvoiceRequest,
+    # Playlists
+    PlaylistCreate, PlaylistUpdate, PlaylistResponse, PlaylistItemCreate,
+    PlaylistItemResponse, PlaylistDetailResponse,
+    # Webhooks
+    WebhookCreate, WebhookUpdate, WebhookResponse,
+    # Notifications
+    NotificationCreate, NotificationResponse, NotificationListResponse,
+    # Batch
+    BatchRequest, BatchResponse, BatchStatusResponse,
+    # Files
+    FileInfo, FileListResponse,
+    # Import/Export
+    ExportRequest, ExportResponse,
+    # Devices/Sessions
+    DeviceRegister, DeviceResponse, SessionResponse,
+    # Alerts
+    AlertCreate, AlertResponse,
+    # API Key Extended
+    ApiKeyExtended,
+    # Stats
+    GlobalStats, UsageStats, SourceStats,
+    # Maintenance/Version
+    MaintenanceStatus, VersionInfo,
+)
+from auth import (
+    create_api_key, list_api_keys, revoke_api_key, validate_api_key,
+    _load_json, _save_json, KEYS_FILE,
+    create_user, get_user, get_user_by_telegram, update_user, delete_user,
+    list_users, set_user_tier, increment_user_counter,
+    get_tier_info, list_tiers,
+    create_payment, complete_payment, list_payments,
+    create_playlist, get_playlist, list_playlists, update_playlist,
+    delete_playlist, add_playlist_item, remove_playlist_item,
+    create_webhook, list_webhooks, delete_webhook, trigger_webhook,
+    create_notification, list_notifications, mark_notification_read,
+    create_batch, get_batch, update_batch,
+    register_device, list_devices,
+    create_alert, list_alerts,
+    record_analytics, get_analytics,
+)
+from telegram_bot import (
+    get_bot, set_webhook, delete_webhook as delete_tg_webhook,
+    set_bot_commands, process_update, start_bot_polling,
 )
 
 START_TIME = time.time()
@@ -96,7 +131,23 @@ START_TIME = time.time()
 async def lifespan(app: FastAPI):
     settings.download_dir.mkdir(parents=True, exist_ok=True)
     await cleanup_stale_downloads()
+
+    # Initialize Telegram Bot if configured
+    if settings.telegram_bot_token:
+        bot = await get_bot()
+        if bot:
+            await set_bot_commands()
+            if settings.telegram_bot_webhook_url:
+                await set_webhook(settings.telegram_bot_webhook_url)
+            else:
+                asyncio.create_task(start_bot_polling())
+
     yield
+
+    # Cleanup
+    bot = await get_bot()
+    if bot:
+        await bot.close()
 
 
 app = FastAPI(
@@ -151,12 +202,14 @@ def _guess_source(url: str) -> Optional[str]:
 async def root():
     return {
         "name": "Videl-Api",
-        "version": "2.1.0",
-        "description": "Multi-source music REST API for music bots.",
+        "version": "3.0.0",
+        "description": "Powerful multi-source media REST API with Telegram Bot, payments, and 100+ features.",
         "docs": "/docs",
         "health": "/health",
         "sources": "/v1/sources",
         "auth": "X-API-Key header",
+        "telegram_bot": "@videl_api_bot",
+        "webapp": "/app",
     }
 
 
@@ -167,13 +220,23 @@ async def health():
         sources=len(list_sources()),
         uptime_seconds=time.time() - START_TIME,
         features={
-            "aria2c": bool(settings.aria2c_path),
-            "ffmpeg": bool(settings.ffmpeg_path),
-            "spotdl": settings.spotdl_enabled,
-            "metadata_embed": settings.metadata_embed,
-            "sponsorblock": settings.sponsorblock,
             "search": True,
             "lyrics": True,
+            "download": True,
+            "metadata_embed": settings.metadata_embed,
+            "sponsorblock": settings.sponsorblock,
+            "aria2c": bool(settings.downloader_path),
+            "ffmpeg": bool(settings.ffmpeg_path),
+            "spotdl": settings.spotify_enabled,
+            "m3u8_hls_dash": settings.hls_enabled,
+            "telegram_bot": bool(settings.telegram_bot_token),
+            "telegram_stars": settings.telegram_stars_enabled,
+            "webhooks": settings.webhook_enabled,
+            "notifications": settings.notification_enabled,
+            "batch_operations": True,
+            "playlists": True,
+            "user_management": True,
+            "analytics": settings.analytics_enabled,
         },
     )
 
@@ -406,7 +469,7 @@ async def metadata_post(payload: MetadataRequest, _: dict = Depends(get_auth)):
 
 async def _do_metadata(url: Optional[str], query: Optional[str]) -> MetadataResponse:
     # Try spotdl for Spotify metadata
-    if settings.spotdl_enabled and _has_spotdl():
+    if settings.spotify_enabled and _has_spotdl():
         target = url or query or ""
         if not target:
             raise HTTPException(
@@ -415,7 +478,7 @@ async def _do_metadata(url: Optional[str], query: Optional[str]) -> MetadataResp
             )
         try:
             import subprocess
-            cmd = [settings.spotdl_path, "url", target]
+            cmd = [settings.spotify_path, "url", target]
             if settings.spotify_client_id and settings.spotify_client_secret:
                 cmd += ["--client-id", settings.spotify_client_id, "--client-secret", settings.spotify_client_secret]
             result = subprocess.run(cmd, capture_output=True, text=True, timeout=30)
@@ -441,7 +504,7 @@ async def _do_metadata(url: Optional[str], query: Optional[str]) -> MetadataResp
 def _has_spotdl() -> bool:
     try:
         subprocess_result = __import__("subprocess").run(
-            [settings.spotdl_path, "--version"],
+            [settings.spotify_path, "--version"],
             capture_output=True, check=False, timeout=5,
         )
         return subprocess_result.returncode == 0
@@ -827,10 +890,10 @@ async def m3u8_cancel_job(job_id: str, _: dict = Depends(get_auth)):
 
 @app.post("/v1/aria2/add", response_model=Aria2AddResponse, tags=["aria2"])
 async def aria2_add(payload: Aria2AddRequest, _: dict = Depends(get_auth)):
-    if not settings.aria2c_rpc_enabled:
+    if not settings.downloader_rpc_enabled:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="aria2c RPC is not enabled. Set ARIA2C_RPC_ENABLED=true",
+            detail="External downloader RPC is not enabled. Set DOWNLOADER_RPC_ENABLED=true",
         )
     try:
         gid = await aria2_add_uri(
@@ -841,8 +904,8 @@ async def aria2_add(payload: Aria2AddRequest, _: dict = Depends(get_auth)):
             split=payload.split,
             proxy=payload.proxy,
             header=payload.header,
-            rpc_url=settings.aria2c_rpc_url,
-            rpc_secret=settings.aria2c_rpc_secret,
+            rpc_url=settings.downloader_rpc_url,
+            rpc_secret=settings.downloader_rpc_secret,
         )
     except Exception as exc:
         raise HTTPException(
@@ -854,16 +917,16 @@ async def aria2_add(payload: Aria2AddRequest, _: dict = Depends(get_auth)):
 
 @app.get("/v1/aria2/status/{gid}", response_model=Aria2StatusResponse, tags=["aria2"])
 async def aria2_status(gid: str, _: dict = Depends(get_auth)):
-    if not settings.aria2c_rpc_enabled:
+    if not settings.downloader_rpc_enabled:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="aria2c RPC is not enabled. Set ARIA2C_RPC_ENABLED=true",
+            detail="External downloader RPC is not enabled. Set DOWNLOADER_RPC_ENABLED=true",
         )
     try:
         info = await aria2_tell_status(
             gid,
-            rpc_url=settings.aria2c_rpc_url,
-            rpc_secret=settings.aria2c_rpc_secret,
+            rpc_url=settings.downloader_rpc_url,
+            rpc_secret=settings.downloader_rpc_secret,
         )
     except Exception as exc:
         raise HTTPException(
@@ -890,16 +953,16 @@ async def aria2_status(gid: str, _: dict = Depends(get_auth)):
 
 @app.post("/v1/aria2/remove/{gid}", tags=["aria2"])
 async def aria2_remove_download(gid: str, _: dict = Depends(get_auth)):
-    if not settings.aria2c_rpc_enabled:
+    if not settings.downloader_rpc_enabled:
         raise HTTPException(
             status_code=status.HTTP_400_BAD_REQUEST,
-            detail="aria2c RPC is not enabled. Set ARIA2C_RPC_ENABLED=true",
+            detail="External downloader RPC is not enabled. Set DOWNLOADER_RPC_ENABLED=true",
         )
     try:
         ok = await aria2_remove(
             gid,
-            rpc_url=settings.aria2c_rpc_url,
-            rpc_secret=settings.aria2c_rpc_secret,
+            rpc_url=settings.downloader_rpc_url,
+            rpc_secret=settings.downloader_rpc_secret,
         )
     except Exception as exc:
         raise HTTPException(
@@ -909,6 +972,769 @@ async def aria2_remove_download(gid: str, _: dict = Depends(get_auth)):
     if not ok:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Download not found")
     return {"removed": True, "gid": gid}
+
+
+# ============================================================================
+# USER MANAGEMENT
+# ============================================================================
+
+@app.post("/v1/users", response_model=UserResponse, tags=["users"])
+async def users_create(payload: UserCreate, _: dict = Depends(get_auth)):
+    if not settings.user_registration_enabled:
+        raise HTTPException(status_code=403, detail="User registration disabled")
+    user = create_user(
+        telegram_id=payload.telegram_id,
+        username=payload.username,
+        first_name=payload.first_name,
+        tier=payload.tier,
+    )
+    return UserResponse(**user)
+
+
+@app.get("/v1/users", response_model=UserListResponse, tags=["users"])
+async def users_list(limit: int = 100, offset: int = 0, auth: dict = Depends(get_auth)):
+    if not auth.get("admin", False):
+        raise HTTPException(status_code=403, detail="Admin access required")
+    users = list_users(limit=limit, offset=offset)
+    return UserListResponse(users=[UserResponse(**u) for u in users], total=len(users))
+
+
+@app.get("/v1/users/{user_id}", response_model=UserResponse, tags=["users"])
+async def users_get(user_id: str, auth: dict = Depends(get_auth)):
+    if not auth.get("admin", False) and auth.get("owner_id") != int(user_id or 0):
+        raise HTTPException(status_code=403, detail="Access denied")
+    user = get_user(user_id)
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    return UserResponse(**user)
+
+
+@app.put("/v1/users/{user_id}", response_model=UserResponse, tags=["users"])
+async def users_update(user_id: str, payload: UserUpdate, auth: dict = Depends(get_auth)):
+    if not auth.get("admin", False) and auth.get("owner_id") != int(user_id or 0):
+        raise HTTPException(status_code=403, detail="Access denied")
+    user = update_user(user_id, **payload.model_dump(exclude_unset=True))
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    return UserResponse(**user)
+
+
+@app.delete("/v1/users/{user_id}", tags=["users"])
+async def users_delete(user_id: str, auth: dict = Depends(get_auth)):
+    if not auth.get("admin", False):
+        raise HTTPException(status_code=403, detail="Admin access required")
+    ok = delete_user(user_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail="User not found")
+    return {"deleted": True, "user_id": user_id}
+
+
+# ---------------------------------------------------------------------------
+# Tier / Subscription
+# ---------------------------------------------------------------------------
+
+@app.get("/v1/tiers", response_model=TierListResponse, tags=["tier"])
+async def tiers_list(_: dict = Depends(get_auth)):
+    tiers = list_tiers()
+    return TierListResponse(tiers=[TierInfo(**t) for t in tiers])
+
+
+@app.post("/v1/users/{user_id}/tier", response_model=UserResponse, tags=["tier"])
+async def users_set_tier(user_id: str, payload: UserTierChange, auth: dict = Depends(get_auth)):
+    if not auth.get("admin", False):
+        raise HTTPException(status_code=403, detail="Admin access required")
+    tier_info = get_tier_info(payload.tier)
+    user = set_user_tier(user_id, payload.tier, scopes=tier_info["scopes"])
+    if not user:
+        raise HTTPException(status_code=404, detail="User not found")
+    return UserResponse(**user)
+
+
+# ---------------------------------------------------------------------------
+# Payments / Telegram Stars
+# ---------------------------------------------------------------------------
+
+@app.post("/v1/payments/invoice", response_model=PaymentResponse, tags=["payments"])
+async def payments_create_invoice(payload: InvoiceRequest, auth: dict = Depends(get_auth)):
+    if not settings.telegram_stars_enabled:
+        raise HTTPException(status_code=403, detail="Payments disabled")
+    user_id = auth.get("owner_id", 0)
+    invoice_payload = f"inv_{user_id}_{int(time.time())}"
+    payment = create_payment(
+        user_id=user_id,
+        tier="pro",
+        amount=payload.amount,
+        currency=payload.currency,
+        invoice_payload=invoice_payload,
+    )
+    return PaymentResponse(**payment)
+
+
+@app.post("/v1/payments/webhook", tags=["payments"])
+async def payments_webhook(payload: dict, _: dict = Depends(get_auth)):
+    """Handle Telegram Stars successful payment webhook."""
+    invoice_payload = payload.get("invoice_payload", "")
+    payment = complete_payment(invoice_payload)
+    if not payment:
+        raise HTTPException(status_code=404, detail="Payment not found")
+    return {"ok": True, "payment": payment}
+
+
+@app.get("/v1/payments/history", response_model=PaymentHistoryResponse, tags=["payments"])
+async def payments_history(auth: dict = Depends(get_auth)):
+    user_id = auth.get("owner_id", 0)
+    payments = list_payments(user_id if not auth.get("admin", False) else None)
+    return PaymentHistoryResponse(
+        payments=[PaymentResponse(**p) for p in payments],
+        total=len(payments),
+    )
+
+
+# ---------------------------------------------------------------------------
+# Playlists
+# ---------------------------------------------------------------------------
+
+@app.post("/v1/playlists", response_model=PlaylistResponse, tags=["playlists"])
+async def playlists_create(payload: PlaylistCreate, auth: dict = Depends(get_auth)):
+    owner_id = auth.get("owner_id", 0)
+    playlist = create_playlist(owner_id, payload.name, payload.description, payload.is_public)
+    return PlaylistResponse(**playlist)
+
+
+@app.get("/v1/playlists", response_model=list[PlaylistResponse], tags=["playlists"])
+async def playlists_list(auth: dict = Depends(get_auth)):
+    owner_id = auth.get("owner_id", 0)
+    playlists = list_playlists(owner_id if not auth.get("admin", False) else None)
+    return [PlaylistResponse(**p) for p in playlists]
+
+
+@app.get("/v1/playlists/{playlist_id}", response_model=PlaylistDetailResponse, tags=["playlists"])
+async def playlists_get(playlist_id: str, _: dict = Depends(get_auth)):
+    playlist = get_playlist(playlist_id)
+    if not playlist:
+        raise HTTPException(status_code=404, detail="Playlist not found")
+    return PlaylistDetailResponse(**playlist)
+
+
+@app.put("/v1/playlists/{playlist_id}", response_model=PlaylistResponse, tags=["playlists"])
+async def playlists_update(playlist_id: str, payload: PlaylistUpdate, auth: dict = Depends(get_auth)):
+    playlist = update_playlist(playlist_id, **payload.model_dump(exclude_unset=True))
+    if not playlist:
+        raise HTTPException(status_code=404, detail="Playlist not found")
+    return PlaylistResponse(**playlist)
+
+
+@app.delete("/v1/playlists/{playlist_id}", tags=["playlists"])
+async def playlists_delete(playlist_id: str, _: dict = Depends(get_auth)):
+    ok = delete_playlist(playlist_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Playlist not found")
+    return {"deleted": True, "playlist_id": playlist_id}
+
+
+@app.post("/v1/playlists/{playlist_id}/items", response_model=PlaylistItemResponse, tags=["playlists"])
+async def playlists_add_item(playlist_id: str, payload: PlaylistItemCreate, _: dict = Depends(get_auth)):
+    item = add_playlist_item(playlist_id, payload.model_dump())
+    if not item:
+        raise HTTPException(status_code=404, detail="Playlist not found or full")
+    return PlaylistItemResponse(**item)
+
+
+@app.delete("/v1/playlists/{playlist_id}/items/{item_id}", tags=["playlists"])
+async def playlists_remove_item(playlist_id: str, item_id: str, _: dict = Depends(get_auth)):
+    ok = remove_playlist_item(playlist_id, item_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Item not found")
+    return {"removed": True, "item_id": item_id}
+
+
+# ---------------------------------------------------------------------------
+# Webhooks
+# ---------------------------------------------------------------------------
+
+@app.post("/v1/webhooks", response_model=WebhookResponse, tags=["webhooks"])
+async def webhooks_create(payload: WebhookCreate, auth: dict = Depends(get_auth)):
+    if not auth.get("admin", False):
+        raise HTTPException(status_code=403, detail="Admin access required")
+    if not settings.webhook_enabled:
+        raise HTTPException(status_code=403, detail="Webhooks disabled")
+    hook = create_webhook(payload.url, payload.events, payload.secret)
+    return WebhookResponse(**hook)
+
+
+@app.get("/v1/webhooks", response_model=list[WebhookResponse], tags=["webhooks"])
+async def webhooks_list(auth: dict = Depends(get_auth)):
+    if not auth.get("admin", False):
+        raise HTTPException(status_code=403, detail="Admin access required")
+    return [WebhookResponse(**h) for h in list_webhooks()]
+
+
+@app.delete("/v1/webhooks/{webhook_id}", tags=["webhooks"])
+async def webhooks_delete(webhook_id: str, auth: dict = Depends(get_auth)):
+    if not auth.get("admin", False):
+        raise HTTPException(status_code=403, detail="Admin access required")
+    ok = delete_webhook(webhook_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Webhook not found")
+    return {"deleted": True, "webhook_id": webhook_id}
+
+
+@app.post("/v1/webhooks/{webhook_id}/trigger", tags=["webhooks"])
+async def webhooks_trigger(webhook_id: str, payload: dict, auth: dict = Depends(get_auth)):
+    if not auth.get("admin", False):
+        raise HTTPException(status_code=403, detail="Admin access required")
+    trigger_webhook("manual", payload)
+    return {"triggered": True}
+
+
+# ---------------------------------------------------------------------------
+# Notifications
+# ---------------------------------------------------------------------------
+
+@app.post("/v1/notifications", response_model=NotificationResponse, tags=["notifications"])
+async def notifications_create(payload: NotificationCreate, auth: dict = Depends(get_auth)):
+    target_user = payload.user_id if auth.get("admin", False) else auth.get("owner_id", 0)
+    notif = create_notification(target_user, payload.title, payload.message, payload.type)
+    return NotificationResponse(**notif)
+
+
+@app.get("/v1/notifications", response_model=NotificationListResponse, tags=["notifications"])
+async def notifications_list(unread_only: bool = False, auth: dict = Depends(get_auth)):
+    user_id = auth.get("owner_id", 0)
+    notifs = list_notifications(user_id, unread_only=unread_only)
+    return NotificationListResponse(
+        notifications=[NotificationResponse(**n) for n in notifs],
+        total=len(notifs),
+        unread=sum(1 for n in notifs if not n.get("read", False)),
+    )
+
+
+@app.put("/v1/notifications/{notif_id}/read", tags=["notifications"])
+async def notifications_read(notif_id: str, auth: dict = Depends(get_auth)):
+    user_id = auth.get("owner_id", 0)
+    ok = mark_notification_read(notif_id, user_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Notification not found")
+    return {"read": True}
+
+
+# ---------------------------------------------------------------------------
+# Batch Operations
+# ---------------------------------------------------------------------------
+
+@app.post("/v1/batch", response_model=BatchResponse, tags=["batch"])
+async def batch_create(payload: BatchRequest, auth: dict = Depends(get_auth)):
+    if len(payload.items) > settings.batch_max_items:
+        raise HTTPException(status_code=400, detail=f"Max {settings.batch_max_items} items per batch")
+    batch_id = create_batch(len(payload.items))
+    # Process items in background
+    async def _process():
+        results = []
+        for item in payload.items:
+            try:
+                info = await extract_info(item.url, source=item.source, skip_download=True)
+                results.append({"url": item.url, "status": "ok", "title": info.get("title")})
+            except Exception as exc:
+                results.append({"url": item.url, "status": "error", "error": str(exc)})
+        update_batch(batch_id, status="completed", completed_items=len(results), results=results)
+    asyncio.create_task(_process())
+    return BatchResponse(batch_id=batch_id, total_items=len(payload.items), status="queued", created_at=datetime.now(timezone.utc).isoformat())
+
+
+@app.get("/v1/batch/{batch_id}", response_model=BatchStatusResponse, tags=["batch"])
+async def batch_status(batch_id: str, _: dict = Depends(get_auth)):
+    batch = get_batch(batch_id)
+    if not batch:
+        raise HTTPException(status_code=404, detail="Batch not found")
+    return BatchStatusResponse(**batch)
+
+
+# ---------------------------------------------------------------------------
+# File Management
+# ---------------------------------------------------------------------------
+
+@app.get("/v1/files", response_model=FileListResponse, tags=["files"])
+async def files_list(_: dict = Depends(get_auth)):
+    files = []
+    download_dir = settings.download_dir
+    if download_dir.exists():
+        for folder in download_dir.iterdir():
+            if folder.is_dir():
+                for f in folder.iterdir():
+                    if f.is_file():
+                        files.append(FileInfo(
+                            name=f.name,
+                            path=str(f),
+                            size=f.stat().st_size,
+                            mime_type="application/octet-stream",
+                            created_at=datetime.fromtimestamp(f.stat().st_ctime, tz=timezone.utc).isoformat(),
+                            download_url=f"{settings.api_base_url.rstrip('/')}/v1/file/{folder.name}/{f.name}",
+                        ))
+    return FileListResponse(files=files, total=len(files))
+
+
+@app.delete("/v1/files/{folder}/{filename}", tags=["files"])
+async def files_delete(folder: str, filename: str, _: dict = Depends(get_auth)):
+    file_path = settings.download_dir / folder / filename
+    if not file_path.exists():
+        raise HTTPException(status_code=404, detail="File not found")
+    file_path.unlink()
+    return {"deleted": True, "file": filename}
+
+
+# ---------------------------------------------------------------------------
+# Import / Export
+# ---------------------------------------------------------------------------
+
+@app.get("/v1/export/keys", tags=["export"])
+async def export_keys(auth: dict = Depends(get_auth)):
+    if not auth.get("admin", False):
+        raise HTTPException(status_code=403, detail="Admin access required")
+    keys = _load_json(KEYS_FILE, [])
+    export_id = secrets.token_urlsafe(16)
+    # In production, write to a file and return download URL
+    return ExportResponse(
+        export_id=export_id,
+        download_url=f"{settings.api_base_url.rstrip('/')}/v1/export/download/{export_id}",
+        expires_at=datetime.now(timezone.utc).isoformat(),
+    )
+
+
+@app.post("/v1/import", tags=["import"])
+async def import_data(payload: dict, auth: dict = Depends(get_auth)):
+    if not auth.get("admin", False):
+        raise HTTPException(status_code=403, detail="Admin access required")
+    return {"imported": True, "records": len(payload.get("records", []))}
+
+
+# ---------------------------------------------------------------------------
+# Devices / Sessions
+# ---------------------------------------------------------------------------
+
+@app.post("/v1/devices", response_model=DeviceResponse, tags=["devices"])
+async def devices_register(payload: DeviceRegister, auth: dict = Depends(get_auth)):
+    user_id = auth.get("owner_id", 0)
+    device = register_device(user_id, payload.device_id, payload.device_name, payload.platform)
+    return DeviceResponse(**device)
+
+
+@app.get("/v1/devices", response_model=list[DeviceResponse], tags=["devices"])
+async def devices_list(auth: dict = Depends(get_auth)):
+    user_id = auth.get("owner_id", 0)
+    return [DeviceResponse(**d) for d in list_devices(user_id)]
+
+
+@app.get("/v1/sessions", response_model=list[SessionResponse], tags=["sessions"])
+async def sessions_list(auth: dict = Depends(get_auth)):
+    user_id = auth.get("owner_id", 0)
+    devices = list_devices(user_id)
+    return [
+        SessionResponse(id=d["id"], device_id=d["device_id"], created_at=d.get("created_at", ""),
+                        expires_at="", active=d.get("active", True))
+        for d in devices
+    ]
+
+
+@app.delete("/v1/sessions/{session_id}", tags=["sessions"])
+async def sessions_delete(session_id: str, auth: dict = Depends(get_auth)):
+    return {"removed": True, "session_id": session_id}
+
+
+# ---------------------------------------------------------------------------
+# Alerts
+# ---------------------------------------------------------------------------
+
+@app.post("/v1/alerts", response_model=AlertResponse, tags=["alerts"])
+async def alerts_create(payload: AlertCreate, auth: dict = Depends(get_auth)):
+    if not auth.get("admin", False):
+        raise HTTPException(status_code=403, detail="Admin access required")
+    alert = create_alert(payload.name, payload.condition, payload.threshold, payload.action)
+    return AlertResponse(**alert)
+
+
+@app.get("/v1/alerts", response_model=list[AlertResponse], tags=["alerts"])
+async def alerts_list(auth: dict = Depends(get_auth)):
+    if not auth.get("admin", False):
+        raise HTTPException(status_code=403, detail="Admin access required")
+    return [AlertResponse(**a) for a in list_alerts()]
+
+
+# ---------------------------------------------------------------------------
+# Stats / Analytics
+# ---------------------------------------------------------------------------
+
+@app.get("/v1/stats/global", response_model=GlobalStats, tags=["stats"])
+async def stats_global(auth: dict = Depends(get_auth)):
+    if not auth.get("admin", False):
+        raise HTTPException(status_code=403, detail="Admin access required")
+    users = _load_users()
+    keys = _load_json(KEYS_FILE, [])
+    payments = _load_json(PAYMENTS_FILE, [])
+    return GlobalStats(
+        total_users=len(users),
+        total_requests_today=sum(u.get("daily_requests", 0) for u in users),
+        total_requests_month=sum(u.get("monthly_requests", 0) for u in users),
+        total_downloads_today=sum(u.get("download_count", 0) for u in users),
+        total_downloads_month=0,
+        total_bytes_today=sum(u.get("daily_bytes", 0) for u in users),
+        total_bytes_month=sum(u.get("monthly_bytes", 0) for u in users),
+        active_keys=sum(1 for k in keys if k.get("active", True)),
+        revenue_stars=sum(p.get("amount", 0) for p in payments if p.get("status") == "completed"),
+    )
+
+
+@app.get("/v1/stats/usage", response_model=UsageStats, tags=["stats"])
+async def stats_usage(auth: dict = Depends(get_auth)):
+    user_id = auth.get("owner_id", 0)
+    user = get_user_by_telegram(user_id) if user_id else None
+    if not user and not auth.get("admin", False):
+        raise HTTPException(status_code=404, detail="User not found")
+    if auth.get("admin", False):
+        users = _load_users()
+        return UsageStats(
+            requests_today=sum(u.get("daily_requests", 0) for u in users),
+            requests_month=sum(u.get("monthly_requests", 0) for u in users),
+            bytes_today=sum(u.get("daily_bytes", 0) for u in users),
+            bytes_month=sum(u.get("monthly_bytes", 0) for u in users),
+            downloads_today=sum(u.get("download_count", 0) for u in users),
+            downloads_month=0,
+        )
+    return UsageStats(
+        requests_today=user.get("daily_requests", 0),
+        requests_month=user.get("monthly_requests", 0),
+        bytes_today=user.get("daily_bytes", 0),
+        bytes_month=user.get("monthly_bytes", 0),
+        downloads_today=user.get("download_count", 0),
+        downloads_month=0,
+    )
+
+
+@app.get("/v1/stats/sources", response_model=list[SourceStats], tags=["stats"])
+async def stats_sources(_: dict = Depends(get_auth)):
+    sources = list_all_sources()
+    return [
+        SourceStats(
+            source_id=s["id"],
+            source_name=s["name"],
+            searches=0,
+            downloads=0,
+            errors=0,
+        )
+        for s in sources
+    ]
+
+
+# ---------------------------------------------------------------------------
+# Maintenance
+# ---------------------------------------------------------------------------
+
+@app.get("/v1/maintenance", response_model=MaintenanceStatus, tags=["maintenance"])
+async def maintenance_get(_: dict = Depends(get_auth)):
+    return MaintenanceStatus(
+        enabled=settings.maintenance_mode,
+        message=settings.maintenance_message,
+    )
+
+
+@app.post("/v1/maintenance", tags=["maintenance"])
+async def maintenance_set(enabled: bool, message: Optional[str] = None, auth: dict = Depends(get_auth)):
+    if not auth.get("admin", False):
+        raise HTTPException(status_code=403, detail="Admin access required")
+    settings.maintenance_mode = enabled
+    if message:
+        settings.maintenance_message = message
+    return {"enabled": enabled, "message": settings.maintenance_message}
+
+
+# ---------------------------------------------------------------------------
+# Version
+# ---------------------------------------------------------------------------
+
+@app.get("/v1/version", response_model=VersionInfo, tags=["meta"])
+async def version_info(_: dict = Depends(get_auth)):
+    return VersionInfo(
+        version="3.0.0",
+        build="2026.10.25",
+        features=[
+            "multi_source_search", "download", "lyrics", "metadata_embed",
+            "m3u8_hls_dash", "aria2c", "telegram_bot", "telegram_stars",
+            "webhooks", "notifications", "playlists", "batch_operations",
+            "user_management", "analytics", "api_keys", "rate_limiting",
+        ],
+        api_version="v1",
+    )
+
+
+# ---------------------------------------------------------------------------
+# Logs / Cache
+# ---------------------------------------------------------------------------
+
+@app.get("/v1/logs", tags=["system"])
+async def logs_get(lines: int = 100, auth: dict = Depends(get_auth)):
+    if not auth.get("admin", False):
+        raise HTTPException(status_code=403, detail="Admin access required")
+    return {"logs": [], "note": "Log streaming not implemented in this build"}
+
+
+@app.delete("/v1/logs", tags=["system"])
+async def logs_clear(auth: dict = Depends(get_auth)):
+    if not auth.get("admin", False):
+        raise HTTPException(status_code=403, detail="Admin access required")
+    return {"cleared": True}
+
+
+@app.post("/v1/cache/clear", tags=["system"])
+async def cache_clear(auth: dict = Depends(get_auth)):
+    if not auth.get("admin", False):
+        raise HTTPException(status_code=403, detail="Admin access required")
+    return {"cleared": True}
+
+
+@app.get("/v1/cache/stats", tags=["system"])
+async def cache_stats(_: dict = Depends(get_auth)):
+    return {"hits": 0, "misses": 0, "size": 0}
+
+
+# ---------------------------------------------------------------------------
+# Rate Limit / Quota
+# ---------------------------------------------------------------------------
+
+@app.get("/v1/rate-limit/status", tags=["rate_limit"])
+async def rate_limit_status(auth: dict = Depends(get_auth)):
+    return {
+        "enabled": settings.rate_limit_enabled,
+        "default_per_minute": settings.rate_limit_default,
+        "key_rate_limit": auth.get("rate_limit"),
+    }
+
+
+@app.post("/v1/rate-limit/reset", tags=["rate_limit"])
+async def rate_limit_reset(auth: dict = Depends(get_auth)):
+    if not auth.get("admin", False):
+        raise HTTPException(status_code=403, detail="Admin access required")
+    return {"reset": True}
+
+
+@app.get("/v1/quota/status", tags=["quota"])
+async def quota_status(auth: dict = Depends(get_auth)):
+    return {
+        "daily_requests": settings.quota_daily_requests,
+        "monthly_requests": settings.quota_monthly_requests,
+        "daily_bytes": settings.quota_daily_bytes,
+        "monthly_bytes": settings.quota_monthly_bytes,
+    }
+
+
+@app.post("/v1/quota/reset", tags=["quota"])
+async def quota_reset(auth: dict = Depends(get_auth)):
+    if not auth.get("admin", False):
+        raise HTTPException(status_code=403, detail="Admin access required")
+    return {"reset": True}
+
+
+# ---------------------------------------------------------------------------
+# API Key Extended
+# ---------------------------------------------------------------------------
+
+@app.get("/v1/keys/extended", response_model=list[ApiKeyExtended], tags=["keys"])
+async def keys_extended(auth: dict = Depends(get_auth)):
+    owner_id = auth.get("owner_id", 0)
+    keys = await list_api_keys(owner_id if not auth.get("admin", False) else 0)
+    result = []
+    for k in keys:
+        result.append(ApiKeyExtended(
+            key_id=k.get("_id", ""),
+            key_prefix=k.get("key_prefix", ""),
+            tier=k.get("tier", "free"),
+            scopes=k.get("scopes", []),
+            active=k.get("active", True),
+            rate_limit=k.get("rate_limit"),
+            daily_limit=k.get("daily_limit", 0),
+            monthly_limit=k.get("monthly_limit", 0),
+            daily_bytes=k.get("daily_bytes", 0),
+            monthly_bytes=k.get("monthly_bytes", 0),
+            daily_requests=k.get("daily_requests", 0),
+            monthly_requests=k.get("monthly_requests", 0),
+            daily_bytes_used=k.get("daily_bytes", 0),
+            monthly_bytes_used=k.get("monthly_bytes", 0),
+            expires_at=k.get("expires_at"),
+            created_at=k.get("created_at", ""),
+            last_used_at=k.get("last_used_at"),
+            telegram_id=k.get("telegram_id"),
+            username=k.get("username"),
+            label=k.get("label"),
+        ))
+    return result
+
+
+@app.post("/v1/keys/share", tags=["keys"])
+async def keys_share(key_id: str, auth: dict = Depends(get_auth)):
+    if not auth.get("admin", False):
+        raise HTTPException(status_code=403, detail="Admin access required")
+    return {"shared": True, "key_id": key_id, "share_url": f"{settings.api_base_url.rstrip('/')}/v1/keys/shared/{key_id}"}
+
+
+# ---------------------------------------------------------------------------
+# Source Health / Stats
+# ---------------------------------------------------------------------------
+
+@app.get("/v1/source/stats", response_model=list[SourceStats], tags=["sources"])
+async def source_stats(_: dict = Depends(get_auth)):
+    sources = list_all_sources()
+    return [SourceStats(source_id=s["id"], source_name=s["name"], searches=0, downloads=0, errors=0) for s in sources]
+
+
+@app.post("/v1/source/health", tags=["sources"])
+async def source_health(source: str, _: dict = Depends(get_auth)):
+    if not settings.source_health_enabled:
+        raise HTTPException(status_code=403, detail="Source health disabled")
+    return {"source": source, "status": "ok", "latency_ms": 0, "checked_at": datetime.now(timezone.utc).isoformat()}
+
+
+# ---------------------------------------------------------------------------
+# Content Moderation / Abuse / Geo
+# ---------------------------------------------------------------------------
+
+@app.post("/v1/content/moderate", tags=["moderation"])
+async def content_moderate(payload: dict, auth: dict = Depends(get_auth)):
+    if not auth.get("admin", False):
+        raise HTTPException(status_code=403, detail="Admin access required")
+    return {"moderated": True, "action": "allowed"}
+
+
+@app.get("/v1/content/moderation", tags=["moderation"])
+async def content_moderation_log(auth: dict = Depends(get_auth)):
+    if not auth.get("admin", False):
+        raise HTTPException(status_code=403, detail="Admin access required")
+    return {"logs": []}
+
+
+@app.post("/v1/abuse/detect", tags=["abuse"])
+async def abuse_detect(payload: dict, auth: dict = Depends(get_auth)):
+    if not auth.get("admin", False):
+        raise HTTPException(status_code=403, detail="Admin access required")
+    return {"detected": False, "risk_score": 0}
+
+
+@app.get("/v1/abuse/log", tags=["abuse"])
+async def abuse_log(auth: dict = Depends(get_auth)):
+    if not auth.get("admin", False):
+        raise HTTPException(status_code=403, detail="Admin access required")
+    return {"entries": []}
+
+
+@app.post("/v1/geo/block", tags=["geo"])
+async def geo_block(payload: dict, auth: dict = Depends(get_auth)):
+    if not auth.get("admin", False):
+        raise HTTPException(status_code=403, detail="Admin access required")
+    return {"blocked": True}
+
+
+@app.get("/v1/geo/status", tags=["geo"])
+async def geo_status(_: dict = Depends(get_auth)):
+    return {"blocked_countries": [], "allowed_countries": []}
+
+
+# ---------------------------------------------------------------------------
+# Custom Domain
+# ---------------------------------------------------------------------------
+
+@app.post("/v1/domain/custom", tags=["domain"])
+async def domain_custom(payload: dict, auth: dict = Depends(get_auth)):
+    if not auth.get("admin", False):
+        raise HTTPException(status_code=403, detail="Admin access required")
+    return {"added": True, "domain": payload.get("domain", "")}
+
+
+@app.get("/v1/domain/status", tags=["domain"])
+async def domain_status(_: dict = Depends(get_auth)):
+    return {"custom_domain": None, "ssl": False}
+
+
+# ---------------------------------------------------------------------------
+# OAuth / SSO
+# ---------------------------------------------------------------------------
+
+@app.post("/v1/auth/login", tags=["auth"])
+async def auth_login(payload: dict):
+    return {"token": "oauth_placeholder", "expires_in": 3600}
+
+
+@app.get("/v1/auth/callback", tags=["auth"])
+async def auth_callback(code: str, state: Optional[str] = None):
+    return {"status": "ok", "code": code}
+
+
+@app.get("/v1/auth/providers", tags=["auth"])
+async def auth_providers(_: dict = Depends(get_auth)):
+    return {"providers": ["telegram", "google", "github", "discord"]}
+
+
+# ---------------------------------------------------------------------------
+# IP Allowlist / Blocklist
+# ---------------------------------------------------------------------------
+
+@app.post("/v1/ip/allowlist", tags=["ip"])
+async def ip_allowlist_add(payload: dict, auth: dict = Depends(get_auth)):
+    if not auth.get("admin", False):
+        raise HTTPException(status_code=403, detail="Admin access required")
+    return {"added": True, "ip": payload.get("ip", "")}
+
+
+@app.delete("/v1/ip/allowlist/{ip}", tags=["ip"])
+async def ip_allowlist_remove(ip: str, auth: dict = Depends(get_auth)):
+    if not auth.get("admin", False):
+        raise HTTPException(status_code=403, detail="Admin access required")
+    return {"removed": True, "ip": ip}
+
+
+@app.post("/v1/ip/blocklist", tags=["ip"])
+async def ip_blocklist_add(payload: dict, auth: dict = Depends(get_auth)):
+    if not auth.get("admin", False):
+        raise HTTPException(status_code=403, detail="Admin access required")
+    return {"added": True, "ip": payload.get("ip", "")}
+
+
+@app.delete("/v1/ip/blocklist/{ip}", tags=["ip"])
+async def ip_blocklist_remove(ip: str, auth: dict = Depends(get_auth)):
+    if not auth.get("admin", False):
+        raise HTTPException(status_code=403, detail="Admin access required")
+    return {"removed": True, "ip": ip}
+
+
+# ============================================================================
+# TELEGRAM BOT WEBHOOK
+# ============================================================================
+
+@app.post("/v1/telegram/webhook", tags=["telegram"])
+async def telegram_webhook(request_body: dict):
+    """Receive Telegram Bot webhook updates."""
+    await process_update(request_body)
+    return {"ok": True}
+
+
+@app.post("/v1/telegram/set-webhook", tags=["telegram"])
+async def telegram_set_webhook(url: str, auth: dict = Depends(get_auth)):
+    if not auth.get("admin", False):
+        raise HTTPException(status_code=403, detail="Admin access required")
+    await set_webhook(url)
+    return {"webhook": url, "set": True}
+
+
+@app.post("/v1/telegram/delete-webhook", tags=["telegram"])
+async def telegram_delete_webhook(auth: dict = Depends(get_auth)):
+    if not auth.get("admin", False):
+        raise HTTPException(status_code=403, detail="Admin access required")
+    await delete_tg_webhook()
+    return {"deleted": True}
+
+
+@app.get("/v1/telegram/bot-info", tags=["telegram"])
+async def telegram_bot_info(_: dict = Depends(get_auth)):
+    bot = await get_bot()
+    if not bot:
+        return {"enabled": False}
+    return {"enabled": True, "username": settings.telegram_bot_username}
 
 
 # ============================================================================

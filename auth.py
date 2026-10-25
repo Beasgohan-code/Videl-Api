@@ -1,6 +1,6 @@
 """Videl-Api authentication with scopes, expiry, quotas, bearer tokens.
 
-Key model (exceeds VYRON):
+Key model:
 - Key IDs are opaque UUIDs; keys stored as sha256 hash + prefix
 - Scopes: read, search, download, admin
 - Per-key rate limit override, expiry, daily/monthly request & byte quotas
@@ -446,7 +446,7 @@ async def patch_api_key(
     expires_in_days: Optional[int] = None,
     label: Optional[str] = None,
 ) -> Optional[dict]:
-    """Edit a key without rotating it (VYRON API 2.1)."""
+    """Edit a key without rotating it."""
     coll, is_mongo = await _key_coll()
     updates = {}
     if scopes is not None:
@@ -594,3 +594,639 @@ async def cleanup_expired_tokens() -> int:
     if changed:
         _save_json(TOKENS_FILE, kept)
     return len(tokens)
+
+
+# ============================================================================
+# USER MANAGEMENT
+# ============================================================================
+
+USERS_FILE = Path("users.json")
+TIERS_FILE = Path("tiers.json")
+PAYMENTS_FILE = Path("payments.json")
+PLAYLISTS_FILE = Path("playlists.json")
+WEBHOOKS_FILE = Path("webhooks.json")
+NOTIFICATIONS_FILE = Path("notifications.json")
+BATCHES_FILE = Path("batches.json")
+DEVICES_FILE = Path("devices.json")
+SESSIONS_FILE = Path("sessions.json")
+ALERTS_FILE = Path("alerts.json")
+ANALYTICS_FILE = Path("analytics.json")
+
+
+def _load_users() -> list[dict]:
+    return _load_json(USERS_FILE, [])
+
+
+def _save_users(users: list[dict]) -> None:
+    _save_json(USERS_FILE, users)
+
+
+def create_user(
+    telegram_id: Optional[int] = None,
+    username: Optional[str] = None,
+    first_name: Optional[str] = None,
+    tier: str = "free",
+    scopes: Optional[list[str]] = None,
+) -> dict:
+    scopes = scopes or ["read", "search"]
+    user_id = secrets.token_urlsafe(16)
+    user = {
+        "id": user_id,
+        "telegram_id": telegram_id,
+        "username": username,
+        "first_name": first_name,
+        "tier": tier,
+        "scopes": scopes,
+        "is_admin": False,
+        "is_owner": False,
+        "created_at": _iso(_now()),
+        "updated_at": _iso(_now()),
+        "daily_requests": 0,
+        "monthly_requests": 0,
+        "daily_bytes": 0,
+        "monthly_bytes": 0,
+        "language": "en",
+        "notifications": True,
+        "stars_balance": 0,
+        "lifetime_stars": 0,
+        "download_count": 0,
+        "search_count": 0,
+        "playlist_count": 0,
+    }
+    users = _load_users()
+    users.append(user)
+    _save_users(users)
+    return user
+
+
+def get_user(user_id: str) -> Optional[dict]:
+    for u in _load_users():
+        if u.get("id") == user_id:
+            return u
+    return None
+
+
+def get_user_by_telegram(telegram_id: int) -> Optional[dict]:
+    for u in _load_users():
+        if u.get("telegram_id") == telegram_id:
+            return u
+    return None
+
+
+def update_user(user_id: str, **kwargs) -> Optional[dict]:
+    users = _load_users()
+    for u in users:
+        if u.get("id") == user_id:
+            u.update(kwargs)
+            u["updated_at"] = _iso(_now())
+            _save_users(users)
+            return u
+    return None
+
+
+def delete_user(user_id: str) -> bool:
+    users = _load_users()
+    changed = False
+    kept = []
+    for u in users:
+        if u.get("id") == user_id:
+            changed = True
+        else:
+            kept.append(u)
+    if changed:
+        _save_users(kept)
+    return changed
+
+
+def list_users(limit: int = 100, offset: int = 0) -> list[dict]:
+    users = _load_users()
+    return users[offset:offset + limit]
+
+
+def set_user_tier(user_id: str, tier: str, scopes: Optional[list[str]] = None) -> Optional[dict]:
+    users = _load_users()
+    tier_scopes = scopes or {
+        "free": ["read", "search"],
+        "pro": ["read", "search", "download"],
+        "owner": ["read", "search", "download", "admin"],
+    }.get(tier, ["read", "search"])
+    for u in users:
+        if u.get("id") == user_id:
+            u["tier"] = tier
+            u["scopes"] = tier_scopes
+            u["is_admin"] = tier == "owner"
+            u["is_owner"] = tier == "owner"
+            u["updated_at"] = _iso(_now())
+            _save_users(users)
+            return u
+    return None
+
+
+def increment_user_counter(telegram_id: int, field: str, amount: int = 1) -> None:
+    users = _load_users()
+    for u in users:
+        if u.get("telegram_id") == telegram_id:
+            u[field] = u.get(field, 0) + amount
+            u["updated_at"] = _iso(_now())
+            break
+    _save_users(users)
+
+
+# ============================================================================
+# TIER INFO
+# ============================================================================
+
+TIER_DEFINITIONS = {
+    "free": {
+        "daily_limit": 100,
+        "monthly_limit": 1000,
+        "daily_bytes_limit": 100 * 1024 * 1024,
+        "monthly_bytes_limit": 1024 * 1024 * 1024,
+        "rate_limit": 100,
+        "scopes": ["read", "search"],
+    },
+    "pro": {
+        "daily_limit": 1000,
+        "monthly_limit": 30000,
+        "daily_bytes_limit": 1024 * 1024 * 1024,
+        "monthly_bytes_limit": 10 * 1024 * 1024 * 1024,
+        "rate_limit": 1000,
+        "scopes": ["read", "search", "download"],
+    },
+    "owner": {
+        "daily_limit": 0,
+        "monthly_limit": 0,
+        "daily_bytes_limit": 0,
+        "monthly_bytes_limit": 0,
+        "rate_limit": None,
+        "scopes": ["read", "search", "download", "admin"],
+    },
+}
+
+
+def get_tier_info(tier: str) -> dict:
+    return TIER_DEFINITIONS.get(tier, TIER_DEFINITIONS["free"])
+
+
+def list_tiers() -> list[dict]:
+    return [
+        {"tier": t, **info} for t, info in TIER_DEFINITIONS.items()
+    ]
+
+
+# ============================================================================
+# PAYMENTS / TELEGRAM STARS
+# ============================================================================
+
+def _load_payments() -> list[dict]:
+    return _load_json(PAYMENTS_FILE, [])
+
+
+def _save_payments(payments: list[dict]) -> None:
+    _save_json(PAYMENTS_FILE, payments)
+
+
+def create_payment(
+    user_id: int,
+    tier: str,
+    amount: int,
+    currency: str,
+    invoice_payload: str,
+) -> dict:
+    payment_id = secrets.token_urlsafe(16)
+    payment = {
+        "id": payment_id,
+        "user_id": user_id,
+        "tier": tier,
+        "amount": amount,
+        "currency": currency,
+        "invoice_payload": invoice_payload,
+        "status": "pending",
+        "created_at": _iso(_now()),
+        "completed_at": None,
+    }
+    payments = _load_payments()
+    payments.append(payment)
+    _save_payments(payments)
+    return payment
+
+
+def complete_payment(invoice_payload: str) -> Optional[dict]:
+    payments = _load_payments()
+    for p in payments:
+        if p.get("invoice_payload") == invoice_payload and p.get("status") == "pending":
+            p["status"] = "completed"
+            p["completed_at"] = _iso(_now())
+            # Upgrade user tier if applicable
+            if p.get("tier") in ("pro", "owner"):
+                user = get_user_by_telegram(p["user_id"])
+                if user:
+                    set_user_tier(user["id"], p["tier"])
+                    # Add stars balance
+                    users = _load_users()
+                    for u in users:
+                        if u.get("id") == user["id"]:
+                            u["stars_balance"] = u.get("stars_balance", 0) + p["amount"]
+                            u["lifetime_stars"] = u.get("lifetime_stars", 0) + p["amount"]
+                            break
+                    _save_users(users)
+            _save_payments(payments)
+            return p
+    return None
+
+
+def list_payments(user_id: Optional[int] = None) -> list[dict]:
+    payments = _load_payments()
+    if user_id is not None:
+        payments = [p for p in payments if p.get("user_id") == user_id]
+    return payments
+
+
+# ============================================================================
+# PLAYLISTS
+# ============================================================================
+
+def _load_playlists() -> list[dict]:
+    return _load_json(PLAYLISTS_FILE, [])
+
+
+def _save_playlists(playlists: list[dict]) -> None:
+    _save_json(PLAYLISTS_FILE, playlists)
+
+
+def create_playlist(owner_id: int, name: str, description: Optional[str] = None, is_public: bool = False) -> dict:
+    playlist_id = secrets.token_urlsafe(16)
+    playlist = {
+        "id": playlist_id,
+        "owner_id": owner_id,
+        "name": name,
+        "description": description,
+        "is_public": is_public,
+        "items": [],
+        "item_count": 0,
+        "created_at": _iso(_now()),
+        "updated_at": _iso(_now()),
+    }
+    playlists = _load_playlists()
+    playlists.append(playlist)
+    _save_playlists(playlists)
+    # Update user playlist count
+    users = _load_users()
+    for u in users:
+        if u.get("telegram_id") == owner_id:
+            u["playlist_count"] = u.get("playlist_count", 0) + 1
+            break
+    _save_users(users)
+    return playlist
+
+
+def get_playlist(playlist_id: str) -> Optional[dict]:
+    for p in _load_playlists():
+        if p.get("id") == playlist_id:
+            return p
+    return None
+
+
+def list_playlists(owner_id: Optional[int] = None) -> list[dict]:
+    playlists = _load_playlists()
+    if owner_id is not None:
+        playlists = [p for p in playlists if p.get("owner_id") == owner_id]
+    return playlists
+
+
+def update_playlist(playlist_id: str, **kwargs) -> Optional[dict]:
+    playlists = _load_playlists()
+    for p in playlists:
+        if p.get("id") == playlist_id:
+            p.update(kwargs)
+            p["updated_at"] = _iso(_now())
+            _save_playlists(playlists)
+            return p
+    return None
+
+
+def delete_playlist(playlist_id: str) -> bool:
+    playlists = _load_playlists()
+    changed = False
+    kept = []
+    for p in playlists:
+        if p.get("id") == playlist_id:
+            changed = True
+        else:
+            kept.append(p)
+    if changed:
+        _save_playlists(kept)
+    return changed
+
+
+def add_playlist_item(playlist_id: str, item: dict) -> Optional[dict]:
+    playlists = _load_playlists()
+    for p in playlists:
+        if p.get("id") == playlist_id:
+            if p.get("item_count", 0) >= 200:
+                return None
+            item["id"] = secrets.token_urlsafe(8)
+            item["position"] = p.get("item_count", 0)
+            item["added_at"] = _iso(_now())
+            p.setdefault("items", []).append(item)
+            p["item_count"] = len(p["items"])
+            p["updated_at"] = _iso(_now())
+            _save_playlists(playlists)
+            return item
+    return None
+
+
+def remove_playlist_item(playlist_id: str, item_id: str) -> bool:
+    playlists = _load_playlists()
+    for p in playlists:
+        if p.get("id") == playlist_id:
+            items = p.get("items", [])
+            kept = [it for it in items if it.get("id") != item_id]
+            if len(kept) != len(items):
+                p["items"] = kept
+                p["item_count"] = len(kept)
+                p["updated_at"] = _iso(_now())
+                _save_playlists(playlists)
+                return True
+    return False
+
+
+# ============================================================================
+# WEBHOOKS
+# ============================================================================
+
+def _load_webhooks() -> list[dict]:
+    return _load_json(WEBHOOKS_FILE, [])
+
+
+def _save_webhooks(webhooks: list[dict]) -> None:
+    _save_json(WEBHOOKS_FILE, webhooks)
+
+
+def create_webhook(url: str, events: list[str], secret: Optional[str] = None) -> dict:
+    webhook_id = secrets.token_urlsafe(16)
+    webhook = {
+        "id": webhook_id,
+        "url": url,
+        "events": events,
+        "secret": secret,
+        "active": True,
+        "created_at": _iso(_now()),
+        "last_triggered": None,
+        "trigger_count": 0,
+    }
+    hooks = _load_webhooks()
+    hooks.append(webhook)
+    _save_webhooks(hooks)
+    return webhook
+
+
+def list_webhooks() -> list[dict]:
+    return _load_webhooks()
+
+
+def delete_webhook(webhook_id: str) -> bool:
+    hooks = _load_webhooks()
+    changed = False
+    kept = []
+    for h in hooks:
+        if h.get("id") == webhook_id:
+            changed = True
+        else:
+            kept.append(h)
+    if changed:
+        _save_webhooks(kept)
+    return changed
+
+
+def trigger_webhook(event: str, payload: dict) -> None:
+    """Trigger webhooks matching an event (fire-and-forget)."""
+    hooks = _load_webhooks()
+    import asyncio
+    import aiohttp
+
+    async def _fire():
+        for h in hooks:
+            if not h.get("active", True):
+                continue
+            if event not in h.get("events", []):
+                continue
+            try:
+                headers = {"Content-Type": "application/json"}
+                if h.get("secret"):
+                    headers["X-Webhook-Secret"] = h["secret"]
+                async with aiohttp.ClientSession() as session:
+                    await session.post(h["url"], json=payload, headers=headers, timeout=10)
+                h["trigger_count"] = h.get("trigger_count", 0) + 1
+                h["last_triggered"] = _iso(_now())
+            except Exception:
+                pass
+        _save_webhooks(hooks)
+
+    try:
+        asyncio.create_task(_fire())
+    except RuntimeError:
+        asyncio.run(_fire())
+
+
+# ============================================================================
+# NOTIFICATIONS
+# ============================================================================
+
+def _load_notifications() -> list[dict]:
+    return _load_json(NOTIFICATIONS_FILE, [])
+
+
+def _save_notifications(notifications: list[dict]) -> None:
+    _save_json(NOTIFICATIONS_FILE, notifications)
+
+
+def create_notification(
+    user_id: int,
+    title: str,
+    message: str,
+    type: str = "info",
+) -> dict:
+    notif_id = secrets.token_urlsafe(16)
+    notif = {
+        "id": notif_id,
+        "user_id": user_id,
+        "title": title,
+        "message": message,
+        "type": type,
+        "read": False,
+        "created_at": _iso(_now()),
+    }
+    notifs = _load_notifications()
+    notifs.append(notif)
+    _save_notifications(notifs)
+    return notif
+
+
+def list_notifications(user_id: int, unread_only: bool = False) -> list[dict]:
+    notifs = _load_notifications()
+    notifs = [n for n in notifs if n.get("user_id") == user_id]
+    if unread_only:
+        notifs = [n for n in notifs if not n.get("read", False)]
+    return notifs
+
+
+def mark_notification_read(notif_id: str, user_id: int) -> bool:
+    notifs = _load_notifications()
+    for n in notifs:
+        if n.get("id") == notif_id and n.get("user_id") == user_id:
+            n["read"] = True
+            _save_notifications(notifs)
+            return True
+    return False
+
+
+# ============================================================================
+# BATCH OPERATIONS
+# ============================================================================
+
+def _load_batches() -> list[dict]:
+    return _load_json(BATCHES_FILE, [])
+
+
+def _save_batches(batches: list[dict]) -> None:
+    _save_json(BATCHES_FILE, batches)
+
+
+def create_batch(total_items: int) -> str:
+    batch_id = secrets.token_urlsafe(16)
+    batch = {
+        "id": batch_id,
+        "status": "queued",
+        "total_items": total_items,
+        "completed_items": 0,
+        "results": [],
+        "error": None,
+        "created_at": _iso(_now()),
+        "updated_at": _iso(_now()),
+    }
+    batches = _load_batches()
+    batches.append(batch)
+    _save_batches(batches)
+    return batch_id
+
+
+def get_batch(batch_id: str) -> Optional[dict]:
+    for b in _load_batches():
+        if b.get("id") == batch_id:
+            return b
+    return None
+
+
+def update_batch(batch_id: str, **kwargs) -> Optional[dict]:
+    batches = _load_batches()
+    for b in batches:
+        if b.get("id") == batch_id:
+            b.update(kwargs)
+            b["updated_at"] = _iso(_now())
+            _save_batches(batches)
+            return b
+    return None
+
+
+# ============================================================================
+# DEVICES / SESSIONS
+# ============================================================================
+
+def _load_devices() -> list[dict]:
+    return _load_json(DEVICES_FILE, [])
+
+
+def _save_devices(devices: list[dict]) -> None:
+    _save_json(DEVICES_FILE, devices)
+
+
+def register_device(user_id: int, device_id: str, device_name: str, platform: str) -> dict:
+    dev_id = secrets.token_urlsafe(16)
+    device = {
+        "id": dev_id,
+        "user_id": user_id,
+        "device_id": device_id,
+        "device_name": device_name,
+        "platform": platform,
+        "last_active": _iso(_now()),
+        "active": True,
+    }
+    devices = _load_devices()
+    # Deactivate old devices with same device_id
+    for d in devices:
+        if d.get("device_id") == device_id:
+            d["active"] = False
+    devices.append(device)
+    _save_devices(devices)
+    return device
+
+
+def list_devices(user_id: int) -> list[dict]:
+    return [d for d in _load_devices() if d.get("user_id") == user_id and d.get("active", True)]
+
+
+# ============================================================================
+# ALERTS
+# ============================================================================
+
+def _load_alerts() -> list[dict]:
+    return _load_json(ALERTS_FILE, [])
+
+
+def _save_alerts(alerts: list[dict]) -> None:
+    _save_json(ALERTS_FILE, alerts)
+
+
+def create_alert(name: str, condition: str, threshold: float, action: str) -> dict:
+    alert_id = secrets.token_urlsafe(16)
+    alert = {
+        "id": alert_id,
+        "name": name,
+        "condition": condition,
+        "threshold": threshold,
+        "action": action,
+        "active": True,
+        "created_at": _iso(_now()),
+    }
+    alerts = _load_alerts()
+    alerts.append(alert)
+    _save_alerts(alerts)
+    return alert
+
+
+def list_alerts() -> list[dict]:
+    return _load_alerts()
+
+
+# ============================================================================
+# ANALYTICS
+# ============================================================================
+
+def _load_analytics() -> list[dict]:
+    return _load_json(ANALYTICS_FILE, [])
+
+
+def _save_analytics(data: list[dict]) -> None:
+    _save_json(ANALYTICS_FILE, data)
+
+
+def record_analytics(event: str, data: dict) -> None:
+    entry = {
+        "event": event,
+        "data": data,
+        "timestamp": _iso(_now()),
+    }
+    analytics = _load_analytics()
+    analytics.append(entry)
+    # Retention: keep last 10000 entries
+    if len(analytics) > 10000:
+        analytics = analytics[-10000:]
+    _save_analytics(analytics)
+
+
+def get_analytics(event: Optional[str] = None) -> list[dict]:
+    analytics = _load_analytics()
+    if event:
+        analytics = [a for a in analytics if a.get("event") == event]
+    return analytics

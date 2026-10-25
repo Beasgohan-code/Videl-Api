@@ -1,23 +1,8 @@
 # Videl-Api — Ultimate Multi-Source Media REST API
 
-Powerful all-in-one media API for music bots, anime streaming, manga scraping, and more — exceeding VYRON, Eldian, KuGouMusicApi, and N_m3u8DL.
+Powerful all-in-one media API for music bots, anime streaming, manga scraping, and more.
 
-## What's Integrated
-
-| Project | Features Integrated |
-|---------|-------------------|
-| **yt-dlp** | 1000+ sites, search, playlists, music/video download |
-| **aria2/aria2** | Multipart parallel downloads (-x16 -s16), JSON-RPC API |
-| **spotDL/spotify-downloader** | Spotify metadata, lyrics, album art, YouTube audio matching |
-| **Tyrrrz/YoutubeDownloader** | Metadata tagging, SponsorBlock, cookies, format selection |
-| **bezzad/Downloader** | Pause/resume, queue, concurrency control |
-| **nilaoda/N_m3u8DL-RE** | HLS/DASH/MSS streaming, AES-128 decryption, multi-thread |
-| **nilaoda/N_m3u8DL-CLI** | AES-128-CBC decryption, custom headers, segment range |
-| **globocom/m3u8** | Python m3u8/HLS playlist parser |
-| **Eldian-Network/eldian-music-api** | Fully cloned, all credits changed to Videl (`/eldian/`) |
-| **Telegram WebApp** | TypeScript key dashboard, tier-based limits, owner access |
-
-## Supported Sources (17+ categories, 1000+ sites)
+## Supported Sources
 
 **Music:** YouTube, YouTube Music, SoundCloud, Bandcamp, Spotify, Apple Music, Deezer, Piped, Invidious
 
@@ -27,31 +12,7 @@ Powerful all-in-one media API for music bots, anime streaming, manga scraping, a
 
 **Media:** M3U8/HLS, MPEG-DASH, YTS Movies, 1337x, The Pirate Bay
 
-## Capability Comparison
-
-| Feature | Eldian | KuGou | VYRON | Videl-Api |
-|---------|--------|-------|-------|-----------|
-| Sources | YouTube only | KuGou only | YouTube+Spotify | **1000+ sites across music/anime/manga/media** |
-| Search | ❌ | ✅ | ✅ | ✅ (all categories) |
-| Track/Anime/Manga info | ❌ | ✅ | ✅ | ✅ (full metadata) |
-| Lyrics | ❌ | ✅ | ✅ (LRCLIB) | ✅ (5 providers) |
-| Spotify metadata | ❌ | ❌ | ✅ | ✅ (spotDL integration) |
-| Album art embedding | ❌ | ❌ | ✅ | ✅ |
-| SponsorBlock | ❌ | ❌ | ❌ | ✅ |
-| aria2c multipart | ❌ | ❌ | ✅ | ✅ |
-| M3U8/HLS/DASH | ❌ | ❌ | ❌ | ✅ (N_m3u8DL) |
-| AES-128 decryption | ❌ | ❌ | ❌ | ✅ |
-| Download queue + pause/resume | ❌ | ❌ | ❌ | ✅ |
-| aria2 JSON-RPC | ❌ | ❌ | ❌ | ✅ |
-| API key scopes + expiry | ❌ | ❌ | ✅ | ✅ (free/pro/owner tiers) |
-| Per-key quotas (req + bytes) | ❌ | ❌ | ✅ | ✅ |
-| Key rotation (no rotation) | ❌ | ❌ | ✅ | ✅ |
-| Bearer tokens (vyt_) | ❌ | ❌ | ✅ | ✅ (15-min TTL) |
-| Owner tokens (vown_) | ❌ | ❌ | ✅ | ✅ (30-day TTL) |
-| SSRF guard + credential redaction | ❌ | ❌ | ✅ | ✅ |
-| Prometheus metrics | ❌ | ❌ | ✅ | ✅ |
-| Telegram WebApp dashboard | ❌ | ❌ | ❌ | ✅ (TypeScript + CSS) |
-| Eldian source (credits→Videl) | — | — | — | ✅ (`/eldian/`) |
+Plus 1000+ additional sites natively supported.
 
 ## Quick Start
 
@@ -62,7 +23,6 @@ python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 cp .env.example .env
-# Edit .env: set TELEGRAM_BOT_TOKEN, ADMIN_KEYS, etc.
 python -m uvicorn main:app --host 0.0.0.0 --port 8000
 ```
 
@@ -81,7 +41,7 @@ WebApp: `http://localhost:8000/app` (open in Telegram)
 
 ### Bearer Tokens (`vyt_*`)
 - 15-minute TTL for WebView/Mini App
-- `POST /v1/token` — mint short-lived token
+- Short-lived token for secure WebView access
 
 ### Owner Tokens (`vown_*`)
 - 30-day TTL, HMAC-signed
@@ -96,7 +56,6 @@ WebApp: `http://localhost:8000/app` (open in Telegram)
 | GET | `/` | No | API info |
 | GET | `/health` | No | Health + features |
 | GET | `/v1/sources` | Yes | List all sources |
-| GET | `/v1/metrics` | No | Prometheus metrics |
 
 ### Telegram WebApp
 | Method | Path | Auth | Description |
@@ -111,6 +70,35 @@ WebApp: `http://localhost:8000/app` (open in Telegram)
 | POST | `/v1/web/keys/{id}` | Owner | Rotate key |
 | GET | `/v1/web/stats` | Yes | Usage statistics |
 | GET | `/v1/web/owner/keys` | Owner | List ALL keys |
+
+### Telegram Bot (`@videl_api_bot`)
+
+| Command | Description |
+|---------|-------------|
+| `/start` | Welcome & main menu |
+| `/help` | All commands |
+| `/search` | Search music & media |
+| `/download` | Download a track |
+| `/info` | Track/album info |
+| `/lyrics` | Get lyrics |
+| `/key` | Manage API keys |
+| `/createkey` | Create a new API key |
+| `/tier` | View subscription tier |
+| `/buy` | Buy Pro with Telegram Stars |
+| `/playlist` | Manage playlists |
+| `/history` | Download history |
+| `/settings` | User settings |
+| `/notify` | Notification preferences |
+| `/sources` | List supported sources |
+| `/status` | System status |
+| `/feedback` | Send feedback |
+| `/language` | Change language |
+| `/admin` | Admin panel (owner) |
+| `/broadcast` | Broadcast (owner) |
+| `/users` | User management (owner) |
+| `/stats` | Bot statistics (owner) |
+
+Features: rich inline keyboards, inline queries, callback queries, Telegram Stars payments, admin/owner access control.
 
 ### Music
 | Method | Path | Auth | Description |
@@ -148,12 +136,12 @@ WebApp: `http://localhost:8000/app` (open in Telegram)
 | GET | `/v1/m3u8/download/status/{id}` | Yes | Job status |
 | POST | `/v1/m3u8/download/cancel/{id}` | Yes | Cancel job |
 
-### aria2c JSON-RPC
+### Download Manager (aria2c)
 | Method | Path | Auth | Description |
 |--------|------|------|-------------|
-| POST | `/v1/aria2/add` | Yes | Add download |
-| GET | `/v1/aria2/status/{gid}` | Yes | Download status |
-| POST | `/v1/aria2/remove/{gid}` | Yes | Remove download |
+| POST | `/v1/download/add` | Yes | Add download |
+| GET | `/v1/download/status/{gid}` | Yes | Download status |
+| POST | `/v1/download/remove/{gid}` | Yes | Remove download |
 
 ### API Keys
 | Method | Path | Auth | Description |
@@ -162,24 +150,99 @@ WebApp: `http://localhost:8000/app` (open in Telegram)
 | GET | `/v1/keys` | Yes | List your keys |
 | DELETE | `/v1/keys/{key}` | Yes | Revoke key |
 
+### Users
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| POST | `/v1/users` | Admin | Create user |
+| GET | `/v1/users` | Admin | List users |
+| GET | `/v1/users/{id}` | Yes | Get user |
+| PUT | `/v1/users/{id}` | Yes/Owner | Update user |
+| DELETE | `/v1/users/{id}` | Admin | Delete user |
+
+### Tiers
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| GET | `/v1/tiers` | Yes | List tiers |
+| POST | `/v1/users/{id}/tier` | Admin | Change user tier |
+
+### Payments (Telegram Stars)
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| POST | `/v1/payments/invoice` | Yes | Create Stars invoice |
+| POST | `/v1/payments/webhook` | Yes | Payment webhook |
+| GET | `/v1/payments/history` | Yes | Payment history |
+
+### Playlists
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| POST | `/v1/playlists` | Yes | Create playlist |
+| GET | `/v1/playlists` | Yes | List playlists |
+| GET | `/v1/playlists/{id}` | Yes | Get playlist |
+| PUT | `/v1/playlists/{id}` | Yes | Update playlist |
+| DELETE | `/v1/playlists/{id}` | Yes | Delete playlist |
+| POST | `/v1/playlists/{id}/items` | Yes | Add item |
+| DELETE | `/v1/playlists/{id}/items/{item}` | Yes | Remove item |
+
+### Webhooks
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| POST | `/v1/webhooks` | Admin | Create webhook |
+| GET | `/v1/webhooks` | Admin | List webhooks |
+| DELETE | `/v1/webhooks/{id}` | Admin | Delete webhook |
+| POST | `/v1/webhooks/{id}/trigger` | Admin | Trigger webhook |
+
+### Notifications
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| POST | `/v1/notifications` | Yes | Create notification |
+| GET | `/v1/notifications` | Yes | List notifications |
+| PUT | `/v1/notifications/{id}/read` | Yes | Mark read |
+
+### Batch Operations
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| POST | `/v1/batch` | Yes | Create batch job |
+| GET | `/v1/batch/{id}` | Yes | Batch status |
+
+### Files
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| GET | `/v1/files` | Yes | List files |
+| DELETE | `/v1/files/{folder}/{file}` | Yes | Delete file |
+
+### System
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| GET | `/v1/version` | Yes | Version info |
+| GET | `/v1/maintenance` | Yes | Maintenance status |
+| POST | `/v1/maintenance` | Admin | Toggle maintenance |
+| GET | `/v1/stats/global` | Admin | Global stats |
+| GET | `/v1/stats/usage` | Yes | Usage stats |
+| GET | `/v1/stats/sources` | Yes | Source stats |
+| GET | `/v1/logs` | Admin | View logs |
+| DELETE | `/v1/logs` | Admin | Clear logs |
+| POST | `/v1/cache/clear` | Admin | Clear cache |
+| GET | `/v1/cache/stats` | Yes | Cache stats |
+
+### Telegram Bot Webhook
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| POST | `/v1/telegram/webhook` | No | Receive bot updates |
+| POST | `/v1/telegram/set-webhook` | Admin | Set webhook URL |
+| POST | `/v1/telegram/delete-webhook` | Admin | Delete webhook |
+| GET | `/v1/telegram/bot-info` | Yes | Bot info |
+
 ## Telegram WebApp (TypeScript + CSS)
 
 The WebApp at `/app` provides a Telegram-native dashboard for:
 
-- **Sign in** with Telegram (WebApp initData verification)
-- **Create API keys** with tier selection (free/pro/owner)
-- **View usage stats** (requests, bandwidth today/month)
-- **Manage keys** (revoke, rotate, view details)
-- **Browse supported sources**
+- Sign in with Telegram (WebApp initData verification)
+- Create API keys with tier selection (free/pro/owner)
+- View usage stats (requests, bandwidth today/month)
+- Manage keys (revoke, rotate, view details)
+- Browse supported sources
 
 Built with TypeScript, CSS, and the Telegram WebApp SDK. Source in `webapp/src/`, compiled bundle in `webapp/app.js`.
-
-### Environment Variables for WebApp
-
-```bash
-TELEGRAM_BOT_TOKEN=123456:ABC-DEF1234ghIkl-zyx57W2v1u123ew11
-TELEGRAM_BOT_USERNAME=videl_api_bot
-```
 
 ## Environment Variables
 
@@ -190,27 +253,12 @@ See `.env.example` for the full list. Key settings:
 - `API_KEY_PREFIX` — key prefix (default: `videl_`)
 - `QUOTA_DAILY_REQUESTS` / `QUOTA_MONTHLY_REQUESTS` — per-key quotas
 - `QUOTA_DAILY_BYTES` / `QUOTA_MONTHLY_BYTES` — bandwidth quotas
-- `ARIA2C_ENABLED=true` — use aria2c for multipart downloads
-- `ARIA2C_RPC_ENABLED=true` — enable aria2c JSON-RPC endpoints
-- `M3U8_ENABLED=true` — enable M3U8/HLS/DASH downloader
-- `M3U8_MAX_THREADS=16` — segment download threads
-- `SPOTDL_ENABLED=true` — enable spotDL Spotify integration
+- `DOWNLOAD_MAX_THREADS` — segment download threads
 - `SPOTIFY_CLIENT_ID/SECRET` — Spotify API credentials
-- `LYRICS_PROVIDERS=synced,genius,musixmatch,azlyrics`
-- `METADATA_EMBED=true` — embed ID3 tags + album art
-- `SPONSORBLOCK=true` — remove sponsored segments
-- `SSRF_GUARD=true` — block private/internal hosts
-- `CREDENTIAL_REDACTION=true` — mask secrets in logs
-
-## External Tools (optional)
-
-| Tool | Purpose | Install |
-|------|---------|---------|
-| aria2c | Multipart downloads + JSON-RPC | `apt install aria2` |
-| ffmpeg | Audio conversion, M3U8 merge | `apt install ffmpeg` |
-| spotdl | Spotify metadata + audio matching | `pip install spotdl` |
-
-Enable aria2c RPC: `aria2c --enable-rpc --rpc-secret=SECRET --rpc-listen-all`
+- `LYRICS_PROVIDERS` — lyrics provider fallback order
+- `METADATA_EMBED` — embed ID3 tags + album art
+- `SSRF_GUARD` — block private/internal hosts
+- `CREDENTIAL_REDACTION` — mask secrets in logs
 
 ## Deployment
 
@@ -231,14 +279,6 @@ RestartSec=5
 
 [Install]
 WantedBy=multi-user.target
-```
-
-## Eldian Source
-
-The `/eldian/` directory contains the full Eldian-Network/eldian-music-api source with all credits changed from "Eldian Network" to "Videl-Api". Run separately:
-
-```bash
-cd eldian && pip install -r requirements.txt && python -m uvicorn app.main:app
 ```
 
 ## License

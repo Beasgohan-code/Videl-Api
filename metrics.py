@@ -1,6 +1,6 @@
 """Videl-Api metrics: in-process counters, latency percentiles, Prometheus text output.
 
-Exceeds VYRON with per-endpoint histograms and quota tracking.
+Per-endpoint histograms and quota tracking.
 """
 
 from __future__ import annotations

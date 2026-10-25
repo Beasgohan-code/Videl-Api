@@ -1,12 +1,6 @@
 """
 Videl-Api M3U8/HLS/DASH Downloader
 
-Integrates best ideas from:
-- globocom/m3u8          - Python m3u8 parser for HLS
-- nilaoda/N_m3u8DL-RE    - Cross-platform DASH/HLS/MSS stream downloader
-- nilaoda/N_m3u8DL-CLI   - AES-128-CBC decryption, multi-thread, custom headers
-- aria2/aria2            - Multi-connection segmented downloads, JSON-RPC
-
 Provides:
 - M3U8/HLS playlist parsing and segment downloading
 - AES-128-CBC automatic decryption
@@ -15,7 +9,7 @@ Provides:
 - Custom HTTP headers, cookies, proxies
 - Live stream recording with catch-up
 - Binary segment merge or ffmpeg muxing
-- aria2c RPC integration for accelerated downloads
+- External downloader RPC integration for accelerated downloads
 """
 
 from __future__ import annotations
@@ -90,7 +84,7 @@ def _m3u8_semaphore() -> asyncio.Semaphore:
 
 
 # ---------------------------------------------------------------------------
-# Playlist parsing (globocom/m3u8 integration)
+# Playlist parsing
 # ---------------------------------------------------------------------------
 
 def parse_m3u8_sync(
@@ -101,7 +95,7 @@ def parse_m3u8_sync(
     proxy: Optional[str] = None,
     timeout: int = 30,
 ) -> dict:
-    """Fetch and parse an M3U8 playlist using globocom/m3u8.
+    """Fetch and parse an M3U8 playlist.
 
     Returns a normalized dict with master/media info, segments, keys, etc.
     """
@@ -242,7 +236,7 @@ async def parse_m3u8(
 
 
 # ---------------------------------------------------------------------------
-# AES-128-CBC decryption (N_m3u8DL-CLI concept)
+# AES-128-CBC decryption
 # ---------------------------------------------------------------------------
 
 def _decrypt_aes128_cbc(data: bytes, key: bytes, iv: bytes) -> bytes:
@@ -309,7 +303,7 @@ async def _fetch_segment(
 
 
 # ---------------------------------------------------------------------------
-# M3U8/HLS download (N_m3u8DL-RE/CLI concepts)
+# M3U8/HLS download
 # ---------------------------------------------------------------------------
 
 async def download_m3u8_sync(
@@ -331,8 +325,8 @@ async def download_m3u8_sync(
 ) -> dict:
     """Download an M3U8/HLS stream.
 
-    Combines globocom/m3u8 parsing + N_m3u8DL multi-thread segment download
-    + AES-128 decryption + binary/ffmpeg merge + optional aria2c acceleration.
+    Combines playlist parsing + multi-thread segment download
+    + AES-128 decryption + binary/ffmpeg merge + optional external downloader acceleration.
     """
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -352,7 +346,7 @@ async def download_m3u8_sync(
         }
 
     if playlist["is_variant"]:
-        # Select best bandwidth playlist (auto-select like N_m3u8DL)
+        # Select best bandwidth playlist (auto-select)
         best = max(playlist["playlists"],
                    key=lambda p: (p["bandwidth"] or 0))
         selected_url = best["absolute_uri"] or best["uri"]
@@ -367,7 +361,7 @@ async def download_m3u8_sync(
     if not segments:
         raise RuntimeError("No segments found in M3U8 playlist")
 
-    # Apply custom range if specified (N_m3u8DL --download-range / --custom-range)
+    # Apply custom range if specified
     if custom_range:
         segments = _apply_range(segments, custom_range, playlist["target_duration"])
 
@@ -488,7 +482,7 @@ def _apply_range(
     custom_range: str,
     target_duration: Optional[float],
 ) -> list[dict]:
-    """Apply N_m3u8DL-style --custom-range / --download-range.
+    """Apply --custom-range / --download-range.
 
     Supports:
       - "0-10"        : segment indices 0 through 10
@@ -537,7 +531,7 @@ def _apply_range(
 
 
 def _merge_binary(seg_files: list[str], output_path: Path) -> None:
-    """Binary concatenation of TS segments (N_m3u8DL --enableBinaryMerge)."""
+    """Binary concatenation of TS segments."""
     with open(output_path, "wb") as out:
         for sf in seg_files:
             with open(sf, "rb") as f:
@@ -564,7 +558,7 @@ def _merge_with_ffmpeg(
                "-i", concat_file, "-c", "copy"]
         if audio_only:
             cmd += ["-vn"]
-        # Fast start for MP4 (N_m3u8DL --enableMuxFastStart)
+        # Fast start for MP4
         if output_path.suffix.lower() == ".mp4":
             cmd += ["-movflags", "+faststart"]
         cmd.append(str(output_path))
@@ -577,7 +571,7 @@ def _merge_with_ffmpeg(
 
 
 # ---------------------------------------------------------------------------
-# aria2c RPC integration (aria2/aria2 JSON-RPC)
+# External downloader RPC (JSON-RPC)
 # ---------------------------------------------------------------------------
 
 async def aria2_add_uri(
@@ -783,7 +777,7 @@ async def list_m3u8_jobs() -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
-# SpotDL Spotify integration (re-exported for main.py)
+# Spotify download helper (re-exported for main.py)
 # ---------------------------------------------------------------------------
 
 async def spotdl_download_url(

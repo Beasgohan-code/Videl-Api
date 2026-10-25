@@ -28,11 +28,12 @@ class HealthResponse(BaseModel):
 
 class SourceItem(BaseModel):
     id: str
+    type: str = "music"
     name: str
-    domains: list[str]
     supports_search: bool
-    supports_playlist: bool
-    supports_album: bool
+    supports_stream: bool = False
+    supports_download: bool = False
+    supports_chapters: bool = False
     description: str
 
 
@@ -326,3 +327,401 @@ class Aria2StatusResponse(BaseModel):
     progress: Optional[float] = None
     dir: Optional[str] = None
     files: list[dict] = []
+
+
+# ============================================================================
+# USER MANAGEMENT
+# ============================================================================
+
+class UserBase(BaseModel):
+    telegram_id: Optional[int] = None
+    username: Optional[str] = None
+    first_name: Optional[str] = None
+    language: str = "en"
+    notifications: bool = True
+
+
+class UserCreate(UserBase):
+    tier: str = "free"
+
+
+class UserUpdate(BaseModel):
+    username: Optional[str] = None
+    first_name: Optional[str] = None
+    language: Optional[str] = None
+    notifications: Optional[bool] = None
+    tier: Optional[str] = None
+
+
+class UserResponse(UserBase):
+    id: str
+    tier: str
+    scopes: list[str] = []
+    is_admin: bool = False
+    is_owner: bool = False
+    daily_requests: int = 0
+    monthly_requests: int = 0
+    daily_bytes: int = 0
+    monthly_bytes: int = 0
+    stars_balance: int = 0
+    lifetime_stars: int = 0
+    download_count: int = 0
+    search_count: int = 0
+    playlist_count: int = 0
+    created_at: str
+    updated_at: str
+
+
+class UserListResponse(BaseModel):
+    users: list[UserResponse]
+    total: int
+
+
+class UserTierChange(BaseModel):
+    tier: str = Field(..., description="free | pro | owner")
+
+
+# ============================================================================
+# TIER / SUBSCRIPTION
+# ============================================================================
+
+class TierInfo(BaseModel):
+    tier: str
+    daily_limit: int
+    monthly_limit: int
+    daily_bytes_limit: int
+    monthly_bytes_limit: int
+    rate_limit: Optional[int]
+    scopes: list[str]
+
+
+class TierListResponse(BaseModel):
+    tiers: list[TierInfo]
+
+
+# ============================================================================
+# PAYMENTS / TELEGRAM STARS
+# ============================================================================
+
+class PaymentCreate(BaseModel):
+    tier: str = Field(..., description="Target tier to upgrade to")
+    amount: int = Field(..., ge=1, description="Amount in Stars")
+
+
+class PaymentResponse(BaseModel):
+    payment_id: str
+    status: str  # pending | completed | failed
+    amount: int
+    currency: str
+    invoice_payload: str
+    created_at: str
+
+
+class PaymentHistoryResponse(BaseModel):
+    payments: list[PaymentResponse]
+    total: int
+
+
+class InvoiceRequest(BaseModel):
+    title: str
+    description: str
+    amount: int
+    currency: str = "XTR"
+
+
+# ============================================================================
+# PLAYLISTS
+# ============================================================================
+
+class PlaylistBase(BaseModel):
+    name: str = Field(..., min_length=1, max_length=100)
+    description: Optional[str] = Field(default=None, max_length=500)
+    is_public: bool = False
+
+
+class PlaylistCreate(PlaylistBase):
+    pass
+
+
+class PlaylistUpdate(BaseModel):
+    name: Optional[str] = Field(default=None, min_length=1, max_length=100)
+    description: Optional[str] = Field(default=None, max_length=500)
+    is_public: Optional[bool] = None
+
+
+class PlaylistResponse(PlaylistBase):
+    id: str
+    owner_id: int
+    item_count: int = 0
+    created_at: str
+    updated_at: str
+
+
+class PlaylistItemBase(BaseModel):
+    title: str
+    url: str
+    source: Optional[str] = None
+    duration: Optional[int] = None
+    thumbnail: Optional[str] = None
+
+
+class PlaylistItemCreate(PlaylistItemBase):
+    pass
+
+
+class PlaylistItemResponse(PlaylistItemBase):
+    id: str
+    playlist_id: str
+    position: int
+    added_at: str
+
+
+class PlaylistDetailResponse(PlaylistResponse):
+    items: list[PlaylistItemResponse] = []
+
+
+# ============================================================================
+# WEBHOOKS
+# ============================================================================
+
+class WebhookCreate(BaseModel):
+    url: str = Field(..., description="Webhook endpoint URL")
+    events: list[str] = Field(default=["download.completed", "payment.completed"])
+    secret: Optional[str] = None
+
+
+class WebhookUpdate(BaseModel):
+    url: Optional[str] = None
+    events: Optional[list[str]] = None
+    secret: Optional[str] = None
+    active: Optional[bool] = None
+
+
+class WebhookResponse(BaseModel):
+    id: str
+    url: str
+    events: list[str]
+    active: bool
+    created_at: str
+    last_triggered: Optional[str] = None
+    trigger_count: int = 0
+
+
+# ============================================================================
+# NOTIFICATIONS
+# ============================================================================
+
+class NotificationCreate(BaseModel):
+    user_id: Optional[int] = Field(default=None, description="Target user (admin only)")
+    title: str = Field(..., min_length=1)
+    message: str = Field(..., min_length=1)
+    type: str = Field(default="info", description="info | warning | error | success")
+
+
+class NotificationResponse(BaseModel):
+    id: str
+    user_id: int
+    title: str
+    message: str
+    type: str
+    read: bool = False
+    created_at: str
+
+
+class NotificationListResponse(BaseModel):
+    notifications: list[NotificationResponse]
+    total: int
+    unread: int
+
+
+# ============================================================================
+# BATCH OPERATIONS
+# ============================================================================
+
+class BatchItem(BaseModel):
+    url: str
+    source: Optional[str] = None
+    format: str = "bestaudio/best"
+    quality: Optional[str] = None
+
+
+class BatchRequest(BaseModel):
+    items: list[BatchItem] = Field(..., min_length=1, max_length=50)
+
+
+class BatchResponse(BaseModel):
+    batch_id: str
+    total_items: int
+    status: str  # queued | processing | completed | failed
+    created_at: str
+
+
+class BatchStatusResponse(BaseModel):
+    batch_id: str
+    status: str
+    completed_items: int
+    total_items: int
+    results: list[dict] = []
+    error: Optional[str] = None
+
+
+# ============================================================================
+# FILE MANAGEMENT
+# ============================================================================
+
+class FileInfo(BaseModel):
+    name: str
+    path: str
+    size: int
+    mime_type: str
+    created_at: str
+    download_url: str
+
+
+class FileListResponse(BaseModel):
+    files: list[FileInfo]
+    total: int
+
+
+# ============================================================================
+# IMPORT / EXPORT
+# ============================================================================
+
+class ExportRequest(BaseModel):
+    type: str = Field(..., description="keys | history | config")
+    user_id: Optional[int] = None
+
+
+class ExportResponse(BaseModel):
+    export_id: str
+    download_url: str
+    expires_at: str
+
+
+# ============================================================================
+# DEVICES / SESSIONS
+# ============================================================================
+
+class DeviceRegister(BaseModel):
+    device_id: str
+    device_name: str
+    platform: str  # ios | android | web | desktop
+
+
+class DeviceResponse(BaseModel):
+    id: str
+    device_id: str
+    device_name: str
+    platform: str
+    last_active: str
+    active: bool
+
+
+class SessionResponse(BaseModel):
+    id: str
+    device_id: str
+    created_at: str
+    expires_at: str
+    active: bool
+
+
+# ============================================================================
+# ALERTS
+# ============================================================================
+
+class AlertCreate(BaseModel):
+    name: str
+    condition: str  # e.g. "daily_requests > 80%"
+    threshold: float
+    action: str  # notify | block | throttle
+
+
+class AlertResponse(BaseModel):
+    id: str
+    name: str
+    condition: str
+    threshold: float
+    action: str
+    active: bool
+    created_at: str
+
+
+# ============================================================================
+# API KEY EXTENDED
+# ============================================================================
+
+class ApiKeyExtended(BaseModel):
+    key_id: str
+    key_prefix: str
+    tier: str
+    scopes: list[str]
+    active: bool
+    rate_limit: Optional[int]
+    daily_limit: int
+    monthly_limit: int
+    daily_bytes: int
+    monthly_bytes: int
+    daily_requests: int
+    monthly_requests: int
+    daily_bytes_used: int
+    monthly_bytes_used: int
+    expires_at: Optional[str]
+    created_at: str
+    last_used_at: Optional[str]
+    telegram_id: Optional[int]
+    username: Optional[str]
+    label: Optional[str]
+
+
+# ============================================================================
+# STATS / ANALYTICS
+# ============================================================================
+
+class GlobalStats(BaseModel):
+    total_users: int
+    total_requests_today: int
+    total_requests_month: int
+    total_downloads_today: int
+    total_downloads_month: int
+    total_bytes_today: int
+    total_bytes_month: int
+    active_keys: int
+    revenue_stars: int
+
+
+class UsageStats(BaseModel):
+    requests_today: int
+    requests_month: int
+    bytes_today: int
+    bytes_month: int
+    downloads_today: int
+    downloads_month: int
+
+
+class SourceStats(BaseModel):
+    source_id: str
+    source_name: str
+    searches: int
+    downloads: int
+    errors: int
+
+
+# ============================================================================
+# MAINTENANCE
+# ============================================================================
+
+class MaintenanceStatus(BaseModel):
+    enabled: bool
+    message: str
+    started_at: Optional[str] = None
+
+
+# ============================================================================
+# VERSION
+# ============================================================================
+
+class VersionInfo(BaseModel):
+    version: str
+    build: str
+    features: list[str]
+    api_version: str

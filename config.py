@@ -66,61 +66,62 @@ class Settings:
     rate_limit_default: int = field(default_factory=lambda: _env_int("RATE_LIMIT_DEFAULT", 60))
     quota_daily_requests: int = field(default_factory=lambda: _env_int("QUOTA_DAILY_REQUESTS", 1000))
     quota_monthly_requests: int = field(default_factory=lambda: _env_int("QUOTA_MONTHLY_REQUESTS", 30000))
-    quota_daily_bytes: int = field(default_factory=lambda: _env_int("QUOTA_DAILY_BYTES", 0))  # 0 = unlimited
+    quota_daily_bytes: int = field(default_factory=lambda: _env_int("QUOTA_DAILY_BYTES", 0))
     quota_monthly_bytes: int = field(default_factory=lambda: _env_int("QUOTA_MONTHLY_BYTES", 0))
 
     # ---- MongoDB (optional) ----
     mongodb_uri: str = field(default_factory=lambda: _env("MONGODB_URI", "mongodb://localhost:27017"))
     mongodb_db: str = field(default_factory=lambda: _env("MONGODB_DB", "videl_music"))
 
-    # ---- yt-dlp downloader ----
-    yt_dlp_format: str = field(default_factory=lambda: _env("YT_DLP_FORMAT", "bestaudio/best"))
-    yt_dlp_socket_timeout: int = field(default_factory=lambda: _env_int("YT_DLP_SOCKET_TIMEOUT", 20))
-    yt_dlp_retries: int = field(default_factory=lambda: _env_int("YT_DLP_RETRIES", 3))
-    yt_dlp_fragment_retries: int = field(default_factory=lambda: _env_int("YT_DLP_FRAGMENT_RETRIES", 3))
+    # ---- Downloader ----
+    download_format: str = field(default_factory=lambda: _env("DOWNLOAD_FORMAT", "bestaudio/best"))
+    download_socket_timeout: int = field(default_factory=lambda: _env_int("DOWNLOAD_SOCKET_TIMEOUT", 20))
+    download_retries: int = field(default_factory=lambda: _env_int("DOWNLOAD_RETRIES", 3))
+    download_fragment_retries: int = field(default_factory=lambda: _env_int("DOWNLOAD_FRAGMENT_RETRIES", 3))
     download_cleanup_seconds: int = field(default_factory=lambda: _env_int("DOWNLOAD_CLEANUP_SECONDS", 900))
     download_max_filesize_mb: int = field(default_factory=lambda: _env_int("DOWNLOAD_MAX_FILESIZE_MB", 0))
     download_dir: Path = field(default_factory=lambda: Path(_env("DOWNLOAD_DIR", "downloads")))
 
-    yt_dlp_proxy: str | None = field(default_factory=lambda: _env("YOUTUBE_PROXY", "") or None)
-    yt_dlp_proxy_file: str | None = field(default_factory=lambda: _env("YOUTUBE_PROXY_FILE", "") or None)
-    yt_dlp_cookies: str | None = field(default_factory=lambda: _env("YOUTUBE_COOKIES", "") or None)
-    yt_dlp_cookies_file: str | None = field(default_factory=lambda: _env("YOUTUBE_COOKIES_FILE", "") or None)
-    yt_dlp_cookies_files: dict = field(default_factory=lambda: _env_json("YOUTUBE_COOKIES_FILES", {}) or {})
+    download_proxy: str | None = field(default_factory=lambda: _env("DOWNLOAD_PROXY", "") or None)
+    download_proxy_file: str | None = field(default_factory=lambda: _env("DOWNLOAD_PROXY_FILE", "") or None)
+    download_cookies: str | None = field(default_factory=lambda: _env("DOWNLOAD_COOKIES", "") or None)
+    download_cookies_file: str | None = field(default_factory=lambda: _env("DOWNLOAD_COOKIES_FILE", "") or None)
+    download_cookies_files: dict = field(default_factory=lambda: _env_json("DOWNLOAD_COOKIES_FILES", {}) or {})
 
-    # ---- External downloaders (aria2c, ffmpeg, spotdl) ----
-    aria2c_path: str = field(default_factory=lambda: _env("ARIA2C_PATH", which("aria2c") or ""))
-    aria2c_args: str = field(default_factory=lambda: _env("ARIA2C_ARGS", "-x 16 -s 16 -k 1M"))
-    aria2c_enabled: bool = field(default_factory=lambda: _env_bool("ARIA2C_ENABLED", True))
-    ffmpeg_path: str = field(default_factory=lambda: _env("FFMPEG_PATH", which("ffmpeg") or ""))
-    spotdl_path: str = field(default_factory=lambda: _env("SPOTDL_PATH", "spotdl"))
-    spotdl_enabled: bool = field(default_factory=lambda: _env_bool("SPOTDL_ENABLED", True))
+    # ---- External downloader ----
+    downloader_path: str = field(default_factory=lambda: _env("ARIA2C_PATH", which("aria2c") or ""))
+    downloader_args: str = field(default_factory=lambda: _env("ARIA2C_ARGS", "-x 16 -s 16 -k 1M"))
+    downloader_enabled: bool = field(default_factory=lambda: _env_bool("ARIA2C_ENABLED", True))
+
+    # ---- Downloader JSON-RPC ----
+    downloader_rpc_url: str = field(default_factory=lambda: _env("ARIA2C_RPC_URL", "http://localhost:6800/jsonrpc"))
+    downloader_rpc_secret: str = field(default_factory=lambda: _env("ARIA2C_RPC_SECRET", ""))
+    downloader_rpc_enabled: bool = field(default_factory=lambda: _env_bool("ARIA2C_RPC_ENABLED", False))
+
+    # ---- HLS / DASH downloader ----
+    hls_enabled: bool = field(default_factory=lambda: _env_bool("HLS_ENABLED", True))
+    hls_max_threads: int = field(default_factory=lambda: _env_int("HLS_MAX_THREADS", 16))
+    hls_merge_method: str = field(default_factory=lambda: _env("HLS_MERGE_METHOD", "binary"))
+    hls_decrypt: bool = field(default_factory=lambda: _env_bool("HLS_DECRYPT", True))
+    hls_default_headers: dict = field(default_factory=lambda: _env_json("HLS_DEFAULT_HEADERS", {}))
+    hls_timeout: int = field(default_factory=lambda: _env_int("HLS_TIMEOUT", 30))
+
+    # ---- Spotify ----
+    spotify_enabled: bool = field(default_factory=lambda: _env_bool("SPOTIFY_ENABLED", True))
+    spotify_path: str = field(default_factory=lambda: _env("SPOTIFY_PATH", "spotify"))
     spotify_client_id: str | None = field(default_factory=lambda: _env("SPOTIFY_CLIENT_ID", "") or None)
     spotify_client_secret: str | None = field(default_factory=lambda: _env("SPOTIFY_CLIENT_SECRET", "") or None)
-
-    # ---- aria2c JSON-RPC (aria2/aria2) ----
-    aria2c_rpc_url: str = field(default_factory=lambda: _env("ARIA2C_RPC_URL", "http://localhost:6800/jsonrpc"))
-    aria2c_rpc_secret: str = field(default_factory=lambda: _env("ARIA2C_RPC_SECRET", ""))
-    aria2c_rpc_enabled: bool = field(default_factory=lambda: _env_bool("ARIA2C_RPC_ENABLED", False))
-
-    # ---- M3U8 / HLS / DASH (globocom/m3u8 + N_m3u8DL-RE/CLI) ----
-    m3u8_enabled: bool = field(default_factory=lambda: _env_bool("M3U8_ENABLED", True))
-    m3u8_max_threads: int = field(default_factory=lambda: _env_int("M3U8_MAX_THREADS", 16))
-    m3u8_merge_method: str = field(default_factory=lambda: _env("M3U8_MERGE_METHOD", "binary"))
-    m3u8_decrypt: bool = field(default_factory=lambda: _env_bool("M3U8_DECRYPT", True))
-    m3u8_default_headers: dict = field(default_factory=lambda: _env_json("M3U8_DEFAULT_HEADERS", {}))
-    m3u8_timeout: int = field(default_factory=lambda: _env_int("M3U8_TIMEOUT", 30))
 
     # ---- Metadata & lyrics ----
     metadata_embed: bool = field(default_factory=lambda: _env_bool("METADATA_EMBED", True))
     metadata_album_art: bool = field(default_factory=lambda: _env_bool("METADATA_ALBUM_ART", True))
+    # ---- FFmpeg ----
+    ffmpeg_path: str = field(default_factory=lambda: _env("FFMPEG_PATH", which("ffmpeg") or ""))
+
+    # ---- Metadata & lyrics ----
     lyrics_providers: list[str] = field(default_factory=lambda: _env_csv("LYRICS_PROVIDERS"))
     lyrics_default_provider: str = field(default_factory=lambda: _env("LYRICS_DEFAULT_PROVIDER", "synced"))
     sponsorblock: bool = field(default_factory=lambda: _env_bool("SPONSORBLOCK", True))
-
-    # ---- Audio effects (ffmpeg) ----
-    audio_effects_enabled: bool = field(default_factory=lambda: _env_bool("AUDIO_EFFECTS_ENABLED", True))
-    effects_cache_ttl_hours: int = field(default_factory=lambda: _env_int("EFFECTS_CACHE_TTL_HOURS", 24))
 
     # ---- Download queue / concurrency ----
     download_max_concurrent: int = field(default_factory=lambda: _env_int("DOWNLOAD_MAX_CONCURRENT", 3))
@@ -142,19 +143,59 @@ class Settings:
     search_default_limit: int = field(default_factory=lambda: _env_int("SEARCH_DEFAULT_LIMIT", 20))
     search_max_limit: int = field(default_factory=lambda: _env_int("SEARCH_MAX_LIMIT", 100))
 
-    # ---- song.link / Odesli matching ----
-    songlink_enabled: bool = field(default_factory=lambda: _env_bool("SONGLINK_ENABLED", True))
-    songlink_api_key: str | None = field(default_factory=lambda: _env("SONGLINK_API_KEY", "") or None)
+    # ---- Telegram Bot ----
+    telegram_bot_token: str | None = field(default_factory=lambda: _env("TELEGRAM_BOT_TOKEN", "") or None)
+    telegram_bot_username: str = field(default_factory=lambda: _env("TELEGRAM_BOT_USERNAME", "videl_api_bot"))
+    telegram_bot_webhook_url: str | None = field(default_factory=lambda: _env("TELEGRAM_BOT_WEBHOOK_URL", "") or None)
+    telegram_bot_polling: bool = field(default_factory=lambda: _env_bool("TELEGRAM_BOT_POLLING", False))
+    telegram_bot_admins: list[int] = field(default_factory=lambda: _env_csv("TELEGRAM_BOT_ADMINS") and [int(x) for x in _env_csv("TELEGRAM_BOT_ADMINS")] or [])
+    telegram_bot_owner_id: int | None = field(default_factory=lambda: _env_int("TELEGRAM_BOT_OWNER_ID", 0) or None)
 
-    # ---- Mini App / web dashboard ----
-    mini_app_enabled: bool = field(default_factory=lambda: _env_bool("MINI_APP_ENABLED", True))
-    mini_app_path: str = field(default_factory=lambda: _env("MINI_APP_PATH", "webapp"))
+    # ---- Telegram Stars / Payments ----
+    telegram_stars_enabled: bool = field(default_factory=lambda: _env_bool("TELEGRAM_STARS_ENABLED", True))
+    telegram_stars_pro_price: int = field(default_factory=lambda: _env_int("TELEGRAM_STARS_PRO_PRICE", 100))
+    telegram_stars_currency: str = field(default_factory=lambda: _env("TELEGRAM_STARS_CURRENCY", "XTR"))
+
+    # ---- User Management ----
+    user_registration_enabled: bool = field(default_factory=lambda: _env_bool("USER_REGISTRATION_ENABLED", True))
+    user_default_tier: str = field(default_factory=lambda: _env("USER_DEFAULT_TIER", "free"))
+    user_max_keys: int = field(default_factory=lambda: _env_int("USER_MAX_KEYS", 5))
+    user_max_playlists: int = field(default_factory=lambda: _env_int("USER_MAX_PLAYLISTS", 10))
+    user_max_downloads_per_day: int = field(default_factory=lambda: _env_int("USER_MAX_DOWNLOADS_PER_DAY", 100))
+
+    # ---- Webhooks ----
+    webhook_enabled: bool = field(default_factory=lambda: _env_bool("WEBHOOK_ENABLED", False))
+    webhook_max_retries: int = field(default_factory=lambda: _env_int("WEBHOOK_MAX_RETRIES", 3))
+    webhook_timeout_seconds: int = field(default_factory=lambda: _env_int("WEBHOOK_TIMEOUT_SECONDS", 10))
+    webhook_secret_token: str | None = field(default_factory=lambda: _env("WEBHOOK_SECRET_TOKEN", "") or None)
+
+    # ---- Notifications ----
+    notification_enabled: bool = field(default_factory=lambda: _env_bool("NOTIFICATION_ENABLED", True))
+    notification_max_per_user: int = field(default_factory=lambda: _env_int("NOTIFICATION_MAX_PER_USER", 100))
+
+    # ---- Playlists ----
+    playlist_max_items: int = field(default_factory=lambda: _env_int("PLAYLIST_MAX_ITEMS", 200))
+    playlist_allow_public: bool = field(default_factory=lambda: _env_bool("PLAYLIST_ALLOW_PUBLIC", True))
+
+    # ---- Batch Operations ----
+    batch_max_items: int = field(default_factory=lambda: _env_int("BATCH_MAX_ITEMS", 50))
+    batch_max_concurrent: int = field(default_factory=lambda: _env_int("BATCH_MAX_CONCURRENT", 5))
+
+    # ---- Analytics ----
+    analytics_enabled: bool = field(default_factory=lambda: _env_bool("ANALYTICS_ENABLED", True))
+    analytics_retention_days: int = field(default_factory=lambda: _env_int("ANALYTICS_RETENTION_DAYS", 90))
+
+    # ---- Maintenance ----
+    maintenance_mode: bool = field(default_factory=lambda: _env_bool("MAINTENANCE_MODE", False))
+    maintenance_message: str = field(default_factory=lambda: _env("MAINTENANCE_MESSAGE", "System under maintenance. Please try again later."))
 
 
 settings = Settings()
 
 
 # --- Music source registry --------------------------------------------------
+# Each source: id, name, domains, and capabilities.
+
 MUSIC_SOURCES: dict[str, dict] = {
     "youtube": {
         "name": "YouTube",
@@ -198,7 +239,7 @@ MUSIC_SOURCES: dict[str, dict] = {
         "search_prefix": None,
         "supports_search": False,
         "supports_playlist": True,
-        "description": "Tracks, albums, playlists (via spotdl metadata + yt-dlp audio).",
+        "description": "Tracks, albums, playlists.",
         "direct_audio": False,
     },
     "apple_music": {
@@ -225,7 +266,7 @@ MUSIC_SOURCES: dict[str, dict] = {
         "search_prefix": None,
         "supports_search": False,
         "supports_playlist": False,
-        "description": "Audius direct audio streaming (Web3 music).",
+        "description": "Direct audio streaming.",
         "direct_audio": True,
     },
     "jiosaavn": {
@@ -234,7 +275,7 @@ MUSIC_SOURCES: dict[str, dict] = {
         "search_prefix": None,
         "supports_search": False,
         "supports_playlist": False,
-        "description": "JioSaavn direct audio streaming (Indian music).",
+        "description": "Direct audio streaming.",
         "direct_audio": True,
     },
     "vimeo": {
@@ -309,68 +350,10 @@ MUSIC_SOURCES: dict[str, dict] = {
         "description": "Alternative YouTube frontend.",
         "direct_audio": False,
     },
-    "m3u8": {
-        "name": "M3U8 / HLS",
-        "domains": [".m3u8", ".m3u8?"],
-        "search_prefix": None,
-        "supports_search": False,
-        "supports_playlist": True,
-        "description": "HLS streaming playlists (via globocom/m3u8 + N_m3u8DL).",
-        "direct_audio": False,
-    },
-    "dash": {
-        "name": "MPEG-DASH",
-        "domains": [".mpd"],
-        "search_prefix": None,
-        "supports_search": False,
-        "supports_playlist": True,
-        "description": "DASH streaming manifests (via N_m3u8DL-RE).",
-        "direct_audio": False,
-    },
 }
 
-GENERIC_SOURCE_ID = "generic"
+# --- Anime source registry --------------------------------------------------
 
-
-def list_sources() -> list[dict]:
-    out = []
-    for sid, info in MUSIC_SOURCES.items():
-        out.append(
-            {
-                "id": sid,
-                "name": info["name"],
-                "domains": info["domains"],
-                "supports_search": info.get("supports_search", False),
-                "supports_playlist": info.get("supports_playlist", False),
-                "supports_album": info.get("supports_album", False),
-                "direct_audio": info.get("direct_audio", False),
-                "description": info.get("description", ""),
-            }
-        )
-    return out
-
-
-def is_searchable(source_id: str) -> bool:
-    info = MUSIC_SOURCES.get(source_id)
-    if not info:
-        return False
-    return bool(info.get("supports_search", False))
-
-
-def search_prefix_for(source_id: str) -> str | None:
-    info = MUSIC_SOURCES.get(source_id)
-    if not info:
-        return None
-    return info.get("search_prefix")
-
-
-# --- Branding -----------------------------------------------------------------
-API_BRAND = "Videl-Api"
-API_BRAND_URL = "https://github.com/Beasgohan-code/Videl-Api"
-API_BRAND_DESC = "Powerful multi-source music & stream REST API — exceeds VYRON, Eldian, KuGou"
-
-
-# --- Anime Streaming Sources (AnimeDL + public anime sites) ----------------
 ANIME_SOURCES: dict[str, dict] = {
     "animepahe": {
         "name": "AnimePahe",
@@ -389,7 +372,7 @@ ANIME_SOURCES: dict[str, dict] = {
         "description": "HD anime streaming.",
     },
     "zoro": {
-        "name": "Zoro.to / AniWatch",
+        "name": "Zoro / AniWatch",
         "base_url": "https://zoro.to",
         "supports_search": True,
         "supports_stream": True,
@@ -418,7 +401,7 @@ ANIME_SOURCES: dict[str, dict] = {
         "supports_search": True,
         "supports_stream": True,
         "supports_download": False,
-        "description": "Italian/international anime.",
+        "description": "International anime.",
     },
     "nineanime": {
         "name": "9Anime",
@@ -438,7 +421,8 @@ ANIME_SOURCES: dict[str, dict] = {
     },
 }
 
-# --- Manga Sources ---
+# --- Manga source registry --------------------------------------------------
+
 MANGA_SOURCES: dict[str, dict] = {
     "mangadex": {
         "name": "MangaDex",
@@ -473,7 +457,7 @@ MANGA_SOURCES: dict[str, dict] = {
         "description": "Digital comics and webtoons.",
     },
     "manhwa": {
-        "name": "Manhwa Sources",
+        "name": "Manhwa",
         "base_url": "",
         "supports_search": True,
         "supports_chapters": True,
@@ -482,8 +466,23 @@ MANGA_SOURCES: dict[str, dict] = {
     },
 }
 
-# --- Additional Media Sources ---
-EXTRA_MEDIA_SOURCES: dict[str, dict] = {
+# --- Media source registry --------------------------------------------------
+
+MEDIA_SOURCES: dict[str, dict] = {
+    "m3u8": {
+        "name": "M3U8 / HLS",
+        "domains": [".m3u8", ".m3u8?"],
+        "supports_search": False,
+        "supports_playlist": True,
+        "description": "HLS streaming playlists.",
+    },
+    "dash": {
+        "name": "MPEG-DASH",
+        "domains": [".mpd"],
+        "supports_search": False,
+        "supports_playlist": True,
+        "description": "DASH streaming manifests.",
+    },
     "yts": {
         "name": "YTS Movies",
         "api_url": "https://yts.mx/api/v2",
@@ -507,7 +506,8 @@ EXTRA_MEDIA_SOURCES: dict[str, dict] = {
     },
 }
 
-# --- Unified Source Registry ---
+# --- Unified source registry ------------------------------------------------
+
 ALL_SOURCES: dict[str, dict] = {}
 for _sid, _info in MUSIC_SOURCES.items():
     ALL_SOURCES[f"music:{_sid}"] = {"type": "music", **_info}
@@ -515,7 +515,7 @@ for _sid, _info in ANIME_SOURCES.items():
     ALL_SOURCES[f"anime:{_sid}"] = {"type": "anime", **_info}
 for _sid, _info in MANGA_SOURCES.items():
     ALL_SOURCES[f"manga:{_sid}"] = {"type": "manga", **_info}
-for _sid, _info in EXTRA_MEDIA_SOURCES.items():
+for _sid, _info in MEDIA_SOURCES.items():
     ALL_SOURCES[f"media:{_sid}"] = {"type": "media", **_info}
 
 
@@ -533,3 +533,27 @@ def list_all_sources() -> list[dict]:
             "description": info.get("description", ""),
         })
     return out
+
+
+def list_sources() -> list[dict]:
+    """Return music sources only (for backward compatibility)."""
+    out = []
+    for sid, info in MUSIC_SOURCES.items():
+        out.append({
+            "id": sid,
+            "type": "music",
+            "name": info["name"],
+            "supports_search": info.get("supports_search", False),
+            "supports_stream": info.get("supports_stream", False),
+            "supports_download": info.get("supports_download", False),
+            "supports_chapters": info.get("supports_chapters", False),
+            "description": info.get("description", ""),
+        })
+    return out
+
+
+# --- Branding ----------------------------------------------------------------
+
+API_BRAND = "Videl-Api"
+API_BRAND_URL = "https://github.com/Beasgohan-code/Videl-Api"
+API_BRAND_DESC = "Powerful multi-source media REST API for music bots and more"
