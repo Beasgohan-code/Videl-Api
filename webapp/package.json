@@ -1,10 +1,11 @@
 {
   "name": "videl-api-webapp",
-  "version": "2.5.0",
-  "description": "Videl-Api Telegram WebApp - API Key Management",
+  "version": "3.2.0",
+  "description": "Telegram WebApp frontend for Videl-Api",
+  "private": true,
   "scripts": {
-    "build": "tsc",
-    "dev": "tsc --watch"
+    "build": "tsc --outFile app.js --module esnext --target es2020 src/main.ts",
+    "build:bundle": "tsc --outFile app.js --module esnext --target es2020 src/main.ts"
   },
   "devDependencies": {
     "typescript": "^5.0.0"

@@ -168,32 +168,36 @@ class AdvancedDownloadManager:
             jobs = [j for j in jobs if j.user_id == user_id]
         return [j.to_dict() for j in jobs]
 
-    async def pause(self, job_id: str) -> bool:
+    async def pause(self, job_id: str) -> tuple[bool, Optional[str]]:
         job = self._jobs.get(job_id)
-        if not job or job.status != JobStatus.DOWNLOADING:
-            return False
+        if not job:
+            return False, "Job not found"
+        if job.status != JobStatus.DOWNLOADING:
+            return False, f"Job is {job.status.value}, not downloading (only downloading jobs can be paused)"
         self._paused.add(job_id)
         job.status = JobStatus.PAUSED
         job.updated_at = datetime.now(timezone.utc).isoformat()
         await ws_manager.send_to_user(job.user_id, {
             "type": "download_paused", "job_id": job_id
         })
-        return True
+        return True, None
 
-    async def resume(self, job_id: str) -> bool:
+    async def resume(self, job_id: str) -> tuple[bool, Optional[str]]:
         job = self._jobs.get(job_id)
-        if not job or job.status != JobStatus.PAUSED:
-            return False
+        if not job:
+            return False, "Job not found"
+        if job.status != JobStatus.PAUSED:
+            return False, f"Job is {job.status.value}, not paused (only paused jobs can be resumed)"
         self._paused.discard(job_id)
         job.status = JobStatus.QUEUED
         job.updated_at = datetime.now(timezone.utc).isoformat()
         self._heap_push(job)
-        return True
+        return True, None
 
-    async def cancel(self, job_id: str) -> bool:
+    async def cancel(self, job_id: str) -> tuple[bool, Optional[str]]:
         job = self._jobs.get(job_id)
         if not job:
-            return False
+            return False, "Job not found"
         job.status = JobStatus.CANCELLED
         self._cancelled.add(job_id)
         job.updated_at = datetime.now(timezone.utc).isoformat()
@@ -204,7 +208,7 @@ class AdvancedDownloadManager:
         await ws_manager.send_to_user(job.user_id, {
             "type": "download_cancelled", "job_id": job_id
         })
-        return True
+        return True, None
 
     async def _process_loop(self) -> None:
         while self._running:

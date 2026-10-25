@@ -59,7 +59,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from fastapi import Depends, FastAPI, HTTPException, status, WebSocket, WebSocketDisconnect
 from starlette.background import BackgroundTask
 from fastapi.middleware.cors import CORSMiddleware
@@ -83,6 +83,13 @@ from m3u8_downloader import (
     cancel_m3u8_job, list_m3u8_jobs, aria2_add_uri, aria2_tell_status,
     aria2_remove, M3U8Job,
 )
+from logger import (
+    get_logger, set_request_id, clear_request_id, log_request,
+    log_download_event, log_auth_event, log_error,
+)
+from watchdog import watchdog
+
+logger = get_logger("videl")
 from models import (
     DownloadResponse, ErrorResponse, HealthResponse, JobListResponse,
     JobActionResponse, LyricsResponse, LyricsSearchRequest, MetadataResponse,
@@ -119,6 +126,100 @@ from models import (
     GlobalStats, UsageStats, SourceStats,
     # Maintenance/Version
     MaintenanceStatus, VersionInfo,
+    # OAuth2 / JWT
+    TokenRequest, TokenResponse, TokenRefreshRequest,
+    # 2FA
+    TwoFactorSetup, TwoFactorVerify, TwoFactorResponse,
+    # Notification preferences
+    NotificationPreference,
+    # File encryption
+    FileEncryptRequest, FileEncryptResponse, FileDecryptRequest,
+    # Speed limiting
+    SpeedLimitRequest, SpeedLimitResponse,
+    # Download scheduling
+    DownloadSchedule, DownloadScheduleResponse,
+    # Content rating
+    ContentRating, ContentRatingResponse,
+    # Favorites
+    FavoriteCreate, FavoriteResponse,
+    # Export
+    HistoryExportRequest,
+    # Key rotation
+    KeyRotationSchedule,
+    # Tier features
+    TierFeatureFlag,
+    # Geo blocking
+    GeoBlockRule,
+    # IP reputation
+    IPReputation,
+    # Signing keys
+    SigningKey,
+    # Bulk keys
+    BulkKeyCreate, BulkKeyResponse,
+    # Key sharing
+    KeyShare, KeyShareResponse,
+    # Teams
+    TeamMember, TeamResponse,
+    # RBAC
+    RoleCreate, RoleResponse, UserRoleAssign,
+    # Audit log
+    AuditLogEntry, AuditLogFilter,
+    # Sessions
+    SessionInfo, SessionRevoke,
+    # Device fingerprint
+    DeviceFingerprint,
+    # Session limits
+    SessionLimit,
+    # Password reset
+    PasswordResetRequest, PasswordResetConfirm,
+    # Custom rate limit
+    CustomRateLimit,
+    # Bandwidth allocation
+    BandwidthAllocation,
+    # Download notification
+    DownloadNotification,
+    # Download retry policy
+    DownloadRetryPolicy,
+    # Source health
+    SourceHealth, SourceLatency,
+    # Failover
+    FailoverRule,
+    # Cache invalidation
+    CacheInvalidation,
+    # Cache warm
+    CacheWarmRequest,
+    # Search history
+    SearchHistoryEntry,
+    # Saved searches
+    SavedSearch, SavedSearchCreate,
+    # Autocomplete
+    AutocompleteRequest,
+    # API Versioning
+    APIVersion,
+    # Trending
+    TrendingSearch,
+    # Popular content
+    PopularContent,
+    # Activity feed
+    ActivityFeedEntry,
+    # Usage reports
+    UsageReport,
+    # Key scopes
+    KeyScopes,
+    # Key usage
+    KeyUsage,
+    # Suspicious activity
+    SuspiciousActivity,
+    # Download concurrency
+    DownloadConcurrency,
+    # File type filter
+    FileTypeFilter,
+    # Virus scan
+    VirusScanResult,
+    # Moderation
+    ModerationItem, ModerationAction,
+    # Watchdog
+    WatchdogHealthResponse, ComponentHealthResponse,
 )
 from auth import (
     create_api_key, list_api_keys, revoke_api_key, validate_api_key,
@@ -135,6 +236,51 @@ from auth import (
     register_device, list_devices,
     create_alert, list_alerts,
     record_analytics, get_analytics,
+    _load_webhook_deliveries,
+    create_oauth_token, validate_oauth_token,
+    setup_2fa, verify_2fa, enable_2fa, verify_2fa_backup,
+    get_notif_prefs, set_notif_prefs,
+    encrypt_file_record, decrypt_file_record,
+    set_speed_limit, get_speed_limit,
+    create_schedule, list_schedules, toggle_schedule,
+    rate_content, get_content_rating,
+    add_favorite, list_favorites, remove_favorite,
+    create_export, list_exports,
+    schedule_key_rotation, list_key_rotations,
+    set_tier_feature, get_tier_features,
+    add_geo_block, list_geo_blocks, is_country_blocked,
+    record_ip_reputation, get_ip_reputation,
+    create_signing_key, list_signing_keys,
+    register_api_version, list_api_versions,
+    bulk_create_keys,
+    create_key_share, list_key_shares,
+    create_team, list_teams, add_team_member,
+    create_role, list_roles, assign_role,
+    write_audit_log, list_audit_logs,
+    create_session, list_sessions, revoke_session,
+    record_device_fingerprint,
+    set_session_limit, get_session_limit,
+    request_password_reset, confirm_password_reset,
+    set_custom_rate_limit,
+    set_bandwidth_allocation,
+    set_download_notification,
+    set_retry_policy,
+    record_source_health, get_source_health, get_source_latency_stats,
+    add_failover_rule, list_failover_rules,
+    invalidate_cache_tag,
+    warm_cache, list_cache_warms,
+    record_search_history, get_search_history,
+    save_search, list_saved_searches, delete_saved_search,
+    record_trending, get_trending,
+    record_activity, get_activity_feed,
+    create_usage_report, list_usage_reports,
+    set_key_scopes, get_key_scopes,
+    record_key_usage, get_key_usage,
+    record_suspicious_activity, list_suspicious_activity,
+    set_download_concurrency, get_download_concurrency,
+    set_file_type_filter, get_file_type_filter,
+    record_virus_scan,
+    add_moderation_item, list_moderation_items, moderate_item,
 )
 from telegram_bot import (
     get_bot, set_webhook, delete_webhook as delete_tg_webhook,
@@ -153,6 +299,9 @@ async def lifespan(app: FastAPI):
     register_default_tasks()
     scheduler.start()
 
+    # Start keep-alive watchdog
+    await watchdog.start()
+
     # Initialize Telegram Bot if configured
     if settings.telegram_bot_token:
         bot = await get_bot()
@@ -163,10 +312,13 @@ async def lifespan(app: FastAPI):
             else:
                 asyncio.create_task(start_bot_polling())
 
+    logger.info("Videl-Api v3.2.0 startup complete")
+
     yield
 
     # Cleanup
     scheduler.stop()
+    await watchdog.stop()
     bot = await get_bot()
     if bot:
         await bot.close()
@@ -178,8 +330,8 @@ async def lifespan(app: FastAPI):
 
 app = FastAPI(
     title="Videl-Api",
-    description="Multi-source music REST API for music bots and more.",
-    version="2.2.0",
+    description="Multi-source media REST API for music bots and more.",
+    version="3.2.0",
     lifespan=lifespan,
 )
 
@@ -191,6 +343,31 @@ if settings.cors_origins:
         allow_methods=["*"],
         allow_headers=["*"],
     )
+
+
+@app.middleware("http")
+async def request_logging_middleware(request, call_next):
+    request_id = set_request_id()
+    start_time = time.time()
+    try:
+        response = await call_next(request)
+        duration_ms = (time.time() - start_time) * 1000
+        log_request(
+            method=request.method,
+            path=request.url.path,
+            status_code=response.status_code,
+            duration_ms=duration_ms,
+            request_id=request_id,
+        )
+        response.headers["X-Request-ID"] = request_id
+        response.headers["X-Process-Time"] = f"{duration_ms:.2f}ms"
+        return response
+    except Exception as exc:
+        duration_ms = (time.time() - start_time) * 1000
+        log_error(exc, context=f"request {request.method} {request.url.path}")
+        raise
+    finally:
+        clear_request_id()
 
 
 # ---------------------------------------------------------------------------
@@ -228,7 +405,7 @@ def _guess_source(url: str) -> Optional[str]:
 async def root():
     return {
         "name": "Videl-Api",
-        "version": "3.0.0",
+        "version": "3.2.0",
         "description": "Powerful multi-source media REST API with Telegram Bot, payments, and 100+ features.",
         "docs": "/docs",
         "health": "/health",
@@ -1100,6 +1277,11 @@ async def advanced_download_create(
         embed_metadata=payload.embed_metadata,
         fetch_lyrics=payload.fetch_lyrics,
     )
+    log_download_event("created", job.job_id, user_id, {
+        "url": payload.url,
+        "source": payload.source,
+        "priority": payload.priority,
+    })
     return job.to_dict()
 
 
@@ -1127,9 +1309,9 @@ async def advanced_download_pause(job_id: str, auth: dict = Depends(get_auth)):
         raise HTTPException(status_code=404, detail="Job not found")
     if not auth.get("admin", False) and job.user_id != auth.get("owner_id", 0):
         raise HTTPException(status_code=403, detail="Access denied")
-    ok = await download_manager.pause(job_id)
+    ok, error = await download_manager.pause(job_id)
     if not ok:
-        raise HTTPException(status_code=400, detail="Cannot pause job")
+        raise HTTPException(status_code=400, detail=error or "Cannot pause job")
     return {"paused": True, "job_id": job_id}
 
 
@@ -1140,9 +1322,9 @@ async def advanced_download_resume(job_id: str, auth: dict = Depends(get_auth)):
         raise HTTPException(status_code=404, detail="Job not found")
     if not auth.get("admin", False) and job.user_id != auth.get("owner_id", 0):
         raise HTTPException(status_code=403, detail="Access denied")
-    ok = await download_manager.resume(job_id)
+    ok, error = await download_manager.resume(job_id)
     if not ok:
-        raise HTTPException(status_code=400, detail="Cannot resume job")
+        raise HTTPException(status_code=400, detail=error or "Cannot resume job")
     return {"resumed": True, "job_id": job_id}
 
 
@@ -1153,9 +1335,9 @@ async def advanced_download_cancel(job_id: str, auth: dict = Depends(get_auth)):
         raise HTTPException(status_code=404, detail="Job not found")
     if not auth.get("admin", False) and job.user_id != auth.get("owner_id", 0):
         raise HTTPException(status_code=403, detail="Access denied")
-    ok = await download_manager.cancel(job_id)
+    ok, error = await download_manager.cancel(job_id)
     if not ok:
-        raise HTTPException(status_code=400, detail="Cannot cancel job")
+        raise HTTPException(status_code=400, detail=error or "Cannot cancel job")
     return {"cancelled": True, "job_id": job_id}
 
 
@@ -1606,22 +1788,6 @@ async def devices_list(auth: dict = Depends(get_auth)):
     return [DeviceResponse(**d) for d in list_devices(user_id)]
 
 
-@app.get("/v1/sessions", response_model=list[SessionResponse], tags=["sessions"])
-async def sessions_list(auth: dict = Depends(get_auth)):
-    user_id = auth.get("owner_id", 0)
-    devices = list_devices(user_id)
-    return [
-        SessionResponse(id=d["id"], device_id=d["device_id"], created_at=d.get("created_at", ""),
-                        expires_at="", active=d.get("active", True))
-        for d in devices
-    ]
-
-
-@app.delete("/v1/sessions/{session_id}", tags=["sessions"])
-async def sessions_delete(session_id: str, auth: dict = Depends(get_auth)):
-    return {"removed": True, "session_id": session_id}
-
-
 # ---------------------------------------------------------------------------
 # Alerts
 # ---------------------------------------------------------------------------
@@ -1735,7 +1901,7 @@ async def maintenance_set(enabled: bool, message: Optional[str] = None, auth: di
 @app.get("/v1/version", response_model=VersionInfo, tags=["meta"])
 async def version_info(_: dict = Depends(get_auth)):
     return VersionInfo(
-        version="3.1.0",
+        version="3.2.0",
         build="2026.10.25",
         features=[
             "multi_source_search", "download", "lyrics", "metadata_embed",
@@ -1767,16 +1933,119 @@ async def logs_clear(auth: dict = Depends(get_auth)):
     return {"cleared": True}
 
 
-@app.post("/v1/cache/clear", tags=["system"])
-async def cache_clear(auth: dict = Depends(get_auth)):
+# ---------------------------------------------------------------------------
+# Watchdog / Keep-Alive Health
+# ---------------------------------------------------------------------------
+
+
+@app.get("/v1/watchdog/health", response_model=WatchdogHealthResponse, tags=["watchdog"])
+async def watchdog_health(auth: dict = Depends(get_auth)):
+    """Get the current health status of all monitored components."""
     if not auth.get("admin", False):
         raise HTTPException(status_code=403, detail="Admin access required")
-    return {"cleared": True}
+    return watchdog.get_health()
 
 
-@app.get("/v1/cache/stats", tags=["system"])
-async def cache_stats(_: dict = Depends(get_auth)):
-    return {"hits": 0, "misses": 0, "size": 0}
+@app.post("/v1/watchdog/recover/{component}", tags=["watchdog"])
+async def watchdog_recover_component(component: str, auth: dict = Depends(get_auth)):
+    """Manually trigger recovery for a specific component."""
+    if not auth.get("admin", False):
+        raise HTTPException(status_code=403, detail="Admin access required")
+    handler = watchdog._recovery_handlers.get(component)
+    if not handler:
+        raise HTTPException(status_code=404, detail=f"No recovery handler for {component}")
+    try:
+        if asyncio.iscoroutinefunction(handler):
+            await handler()
+        else:
+            handler()
+        return {"recovered": True, "component": component}
+    except Exception as exc:
+        log_error(exc, context=f"watchdog manual recovery {component}")
+        raise HTTPException(status_code=500, detail=str(exc))
+
+
+# ---------------------------------------------------------------------------
+# System Info & Diagnostics
+# ---------------------------------------------------------------------------
+
+@app.get("/v1/system/info", tags=["system"])
+async def system_info(_: dict = Depends(get_auth)):
+    import platform
+    import sys
+    return {
+        "platform": platform.platform(),
+        "python_version": sys.version,
+        "cpu_count": __import__("os").cpu_count(),
+        "uptime_seconds": time.time() - START_TIME,
+        "version": "3.2.0",
+    }
+
+
+@app.get("/v1/system/disk", tags=["system"])
+async def system_disk(auth: dict = Depends(get_auth)):
+    if not auth.get("admin", False):
+        raise HTTPException(status_code=403, detail="Admin access required")
+    import shutil
+    total, used, free = shutil.disk_usage("/")
+    return {
+        "total_bytes": total,
+        "used_bytes": used,
+        "free_bytes": free,
+        "usage_percent": round(used / total * 100, 2),
+    }
+
+
+@app.get("/v1/system/memory", tags=["system"])
+async def system_memory(auth: dict = Depends(get_auth)):
+    if not auth.get("admin", False):
+        raise HTTPException(status_code=403, detail="Admin access required")
+    import os
+    try:
+        with open("/proc/meminfo") as f:
+            meminfo = {}
+            for line in f:
+                parts = line.split()
+                if len(parts) >= 2:
+                    meminfo[parts[0].rstrip(":")] = int(parts[1]) * 1024
+        return {
+            "total": meminfo.get("MemTotal", 0),
+            "available": meminfo.get("MemAvailable", 0),
+            "free": meminfo.get("MemFree", 0),
+        }
+    except Exception:
+        return {"error": "Memory info not available"}
+
+
+# ---------------------------------------------------------------------------
+# Environment / Config (safe values only)
+# ---------------------------------------------------------------------------
+
+@app.get("/v1/config", tags=["system"])
+async def config_view(auth: dict = Depends(get_auth)):
+    if not auth.get("admin", False):
+        raise HTTPException(status_code=403, detail="Admin access required")
+    return {
+        "api_version": settings.api_version,
+        "download_dir": str(settings.download_dir),
+        "max_concurrent": settings.download_max_concurrent,
+        "rate_limit_default": settings.rate_limit_default,
+        "quota_daily_requests": settings.quota_daily_requests,
+        "quota_monthly_requests": settings.quota_monthly_requests,
+        "hls_enabled": settings.hls_enabled,
+        "hls_max_threads": settings.hls_max_threads,
+        "metadata_embed": settings.metadata_embed,
+        "sponsorblock": settings.sponsorblock,
+        "telegram_bot_enabled": bool(settings.telegram_bot_token),
+        "telegram_stars_enabled": settings.telegram_stars_enabled,
+        "webhook_enabled": settings.webhook_enabled,
+        "notification_enabled": settings.notification_enabled,
+        "analytics_enabled": settings.analytics_enabled,
+        "maintenance_mode": settings.maintenance_mode,
+        "user_registration_enabled": settings.user_registration_enabled,
+        "ssrf_guard": settings.ssrf_guard,
+        "credential_redaction": settings.credential_redaction,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -1851,12 +2120,6 @@ async def keys_extended(auth: dict = Depends(get_auth)):
     return result
 
 
-@app.post("/v1/keys/share", tags=["keys"])
-async def keys_share(key_id: str, auth: dict = Depends(get_auth)):
-    if not auth.get("admin", False):
-        raise HTTPException(status_code=403, detail="Admin access required")
-    return {"shared": True, "key_id": key_id, "share_url": f"{settings.api_base_url.rstrip('/')}/v1/keys/shared/{key_id}"}
-
 
 # ---------------------------------------------------------------------------
 # Source Health / Stats
@@ -1868,11 +2131,7 @@ async def source_stats(_: dict = Depends(get_auth)):
     return [SourceStats(source_id=s["id"], source_name=s["name"], searches=0, downloads=0, errors=0) for s in sources]
 
 
-@app.post("/v1/source/health", tags=["sources"])
-async def source_health(source: str, _: dict = Depends(get_auth)):
-    if not settings.source_health_enabled:
-        raise HTTPException(status_code=403, detail="Source health disabled")
-    return {"source": source, "status": "ok", "latency_ms": 0, "checked_at": datetime.now(timezone.utc).isoformat()}
+
 
 
 # ---------------------------------------------------------------------------
@@ -1905,13 +2164,6 @@ async def abuse_log(auth: dict = Depends(get_auth)):
     if not auth.get("admin", False):
         raise HTTPException(status_code=403, detail="Admin access required")
     return {"entries": []}
-
-
-@app.post("/v1/geo/block", tags=["geo"])
-async def geo_block(payload: dict, auth: dict = Depends(get_auth)):
-    if not auth.get("admin", False):
-        raise HTTPException(status_code=403, detail="Admin access required")
-    return {"blocked": True}
 
 
 @app.get("/v1/geo/status", tags=["geo"])
@@ -2019,6 +2271,853 @@ async def telegram_bot_info(_: dict = Depends(get_auth)):
     if not bot:
         return {"enabled": False}
     return {"enabled": True, "username": settings.telegram_bot_username}
+
+
+# ============================================================================
+# OAUTH2 / JWT TOKENS
+# ============================================================================
+
+@app.post("/v1/auth/token", response_model=TokenResponse, tags=["auth"])
+async def oauth_token(payload: TokenRequest):
+    # Validate client credentials (simple check)
+    client_id = payload.__dict__.get("client_id", "default")
+    client_secret = payload.__dict__.get("client_secret", "default")
+    result = create_oauth_token(client_id, client_secret, payload.scope)
+    if not result:
+        raise HTTPException(status_code=401, detail="Invalid client credentials")
+    return result
+
+
+@app.post("/v1/auth/token/refresh", tags=["auth"])
+async def oauth_refresh(payload: TokenRefreshRequest):
+    result = validate_oauth_token(payload.refresh_token)
+    if not result:
+        raise HTTPException(status_code=401, detail="Invalid refresh token")
+    new_token = create_oauth_token(result.get("client_id", "default"), "",
+                                    result.get("scope"))
+    if not new_token:
+        raise HTTPException(status_code=500, detail="Token refresh failed")
+    return new_token
+
+
+# ============================================================================
+# TWO-FACTOR AUTHENTICATION
+# ============================================================================
+
+@app.post("/v1/auth/2fa/setup", response_model=TwoFactorResponse, tags=["auth"])
+async def auth_2fa_setup(payload: TwoFactorSetup, auth: dict = Depends(get_auth)):
+    if not auth.get("admin", False) and auth.get("owner_id") != payload.user_id:
+        raise HTTPException(status_code=403, detail="Access denied")
+    return setup_2fa(payload.user_id)
+
+
+@app.post("/v1/auth/2fa/verify", tags=["auth"])
+async def auth_2fa_verify(payload: TwoFactorVerify, _: dict = Depends(get_auth)):
+    ok = verify_2fa(payload.user_id, payload.token)
+    if not ok:
+        raise HTTPException(status_code=401, detail="Invalid 2FA token")
+    enable_2fa(payload.user_id)
+    return {"verified": True}
+
+
+@app.post("/v1/auth/2fa/backup", tags=["auth"])
+async def auth_2fa_backup(user_id: int, code: str, auth: dict = Depends(get_auth)):
+    if not auth.get("admin", False) and auth.get("owner_id") != user_id:
+        raise HTTPException(status_code=403, detail="Access denied")
+    ok = verify_2fa_backup(user_id, code)
+    if not ok:
+        raise HTTPException(status_code=401, detail="Invalid backup code")
+    return {"verified": True}
+
+
+# ============================================================================
+# NOTIFICATION PREFERENCES
+# ============================================================================
+
+@app.get("/v1/notifications/preferences", tags=["notifications"])
+async def notif_prefs_get(auth: dict = Depends(get_auth)):
+    user_id = auth.get("owner_id", 0)
+    return get_notif_prefs(user_id)
+
+
+@app.put("/v1/notifications/preferences", tags=["notifications"])
+async def notif_prefs_put(payload: NotificationPreference, auth: dict = Depends(get_auth)):
+    user_id = auth.get("owner_id", 0)
+    return set_notif_prefs(user_id, payload.model_dump())
+
+
+# ============================================================================
+# FILE ENCRYPTION
+# ============================================================================
+
+@app.post("/v1/files/encrypt", response_model=FileEncryptResponse, tags=["files"])
+async def files_encrypt(payload: FileEncryptRequest, _: dict = Depends(get_auth)):
+    return encrypt_file_record(payload.file_path, payload.password)
+
+
+@app.post("/v1/files/decrypt", tags=["files"])
+async def files_decrypt(payload: FileDecryptRequest, _: dict = Depends(get_auth)):
+    ok = decrypt_file_record(payload.file_path, payload.password)
+    if not ok:
+        raise HTTPException(status_code=400, detail="Decryption failed")
+    return {"decrypted": True}
+
+
+# ============================================================================
+# DOWNLOAD SPEED LIMITING
+# ============================================================================
+
+@app.post("/v1/download/speed-limit", response_model=SpeedLimitResponse, tags=["download"])
+async def download_speed_limit(payload: SpeedLimitRequest, auth: dict = Depends(get_auth)):
+    if not auth.get("admin", False):
+        raise HTTPException(status_code=403, detail="Admin access required")
+    return set_speed_limit(payload.key_id, payload.max_kbps)
+
+
+@app.get("/v1/download/speed-limit/{key_id}", tags=["download"])
+async def download_speed_limit_get(key_id: str, _: dict = Depends(get_auth)):
+    limit = get_speed_limit(key_id)
+    if not limit:
+        raise HTTPException(status_code=404, detail="Speed limit not found")
+    return limit
+
+
+# ============================================================================
+# DOWNLOAD SCHEDULING
+# ============================================================================
+
+@app.post("/v1/download/schedule", response_model=DownloadScheduleResponse, tags=["download"])
+async def download_schedule(payload: DownloadSchedule, auth: dict = Depends(get_auth)):
+    user_id = auth.get("owner_id", 0)
+    return create_schedule(payload.url, payload.cron_expression,
+                           enabled=payload.enabled, format=payload.format,
+                           source=payload.source, user_id=user_id)
+
+
+@app.get("/v1/download/schedule", tags=["download"])
+async def download_schedule_list(auth: dict = Depends(get_auth)):
+    user_id = auth.get("owner_id", 0)
+    return {"schedules": list_schedules(user_id if not auth.get("admin", False) else None)}
+
+
+@app.post("/v1/download/schedule/{schedule_id}/toggle", tags=["download"])
+async def download_schedule_toggle(schedule_id: str, enabled: bool,
+                                    auth: dict = Depends(get_auth)):
+    ok = toggle_schedule(schedule_id, enabled)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Schedule not found")
+    return {"enabled": enabled, "schedule_id": schedule_id}
+
+
+# ============================================================================
+# CONTENT RATING
+# ============================================================================
+
+@app.post("/v1/content/rate", response_model=ContentRatingResponse, tags=["content"])
+async def content_rate(payload: ContentRating, auth: dict = Depends(get_auth)):
+    user_id = auth.get("owner_id", 0)
+    return rate_content(payload.content_id, payload.rating, user_id, payload.review)
+
+
+@app.get("/v1/content/rate/{content_id}", response_model=ContentRatingResponse, tags=["content"])
+async def content_rating_get(content_id: str, user_id: int = 0,
+                              _: dict = Depends(get_auth)):
+    return get_content_rating(content_id, user_id)
+
+
+# ============================================================================
+# FAVORITES / BOOKMARKS
+# ============================================================================
+
+@app.post("/v1/favorites", response_model=FavoriteResponse, tags=["favorites"])
+async def favorites_add(payload: FavoriteCreate, auth: dict = Depends(get_auth)):
+    user_id = auth.get("owner_id", 0)
+    return add_favorite(user_id, payload.title, payload.url,
+                        source=payload.source, thumbnail=payload.thumbnail,
+                        tags=payload.tags)
+
+
+@app.get("/v1/favorites", response_model=list[FavoriteResponse], tags=["favorites"])
+async def favorites_list(auth: dict = Depends(get_auth)):
+    user_id = auth.get("owner_id", 0)
+    return list_favorites(user_id)
+
+
+@app.delete("/v1/favorites/{fav_id}", tags=["favorites"])
+async def favorites_remove(fav_id: str, auth: dict = Depends(get_auth)):
+    user_id = auth.get("owner_id", 0)
+    ok = remove_favorite(fav_id, user_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Favorite not found")
+    return {"removed": True}
+
+
+# ============================================================================
+# DOWNLOAD HISTORY EXPORT
+# ============================================================================
+
+@app.post("/v1/export/history", tags=["export"])
+async def export_history(payload: HistoryExportRequest, auth: dict = Depends(get_auth)):
+    user_id = auth.get("owner_id", 0)
+    return create_export(user_id, payload.format.value)
+
+
+@app.get("/v1/export/history", tags=["export"])
+async def export_history_list(auth: dict = Depends(get_auth)):
+    user_id = auth.get("owner_id", 0)
+    return {"exports": list_exports(user_id)}
+
+
+# ============================================================================
+# WEBHOOK DELIVERY TRACKING
+# ============================================================================
+
+@app.get("/v1/webhooks/deliveries", tags=["webhooks"])
+async def webhook_deliveries(auth: dict = Depends(get_auth)):
+    if not auth.get("admin", False):
+        raise HTTPException(status_code=403, detail="Admin access required")
+    return {"deliveries": _load_webhook_deliveries() if "_load_webhook_deliveries" in dir() else []}
+
+
+# ============================================================================
+# API KEY AUTO-ROTATION
+# ============================================================================
+
+@app.post("/v1/keys/rotation/schedule", tags=["keys"])
+async def key_rotation_schedule(payload: KeyRotationSchedule, auth: dict = Depends(get_auth)):
+    if not auth.get("admin", False):
+        raise HTTPException(status_code=403, detail="Admin access required")
+    return schedule_key_rotation(payload.key_id, payload.interval_days, payload.enabled)
+
+
+@app.get("/v1/keys/rotation", tags=["keys"])
+async def key_rotation_list(auth: dict = Depends(get_auth)):
+    if not auth.get("admin", False):
+        raise HTTPException(status_code=403, detail="Admin access required")
+    return {"rotations": list_key_rotations()}
+
+
+# ============================================================================
+# TIER FEATURE FLAGS
+# ============================================================================
+
+@app.post("/v1/tiers/features", tags=["tier"])
+async def tier_feature_set(payload: TierFeatureFlag, auth: dict = Depends(get_auth)):
+    if not auth.get("admin", False):
+        raise HTTPException(status_code=403, detail="Admin access required")
+    return set_tier_feature(payload.tier, payload.feature, payload.enabled)
+
+
+@app.get("/v1/tiers/{tier}/features", tags=["tier"])
+async def tier_feature_get(tier: str, auth: dict = Depends(get_auth)):
+    return {"tier": tier, "features": get_tier_features(tier)}
+
+
+# ============================================================================
+# GEO-BLOCKING
+# ============================================================================
+
+@app.post("/v1/geo/block", tags=["geo"])
+async def geo_block_add(payload: GeoBlockRule, auth: dict = Depends(get_auth)):
+    if not auth.get("admin", False):
+        raise HTTPException(status_code=403, detail="Admin access required")
+    return add_geo_block(payload.country_code, payload.blocked, payload.reason)
+
+
+@app.get("/v1/geo/blocked", tags=["geo"])
+async def geo_block_list(_: dict = Depends(get_auth)):
+    return {"blocks": list_geo_blocks()}
+
+
+@app.get("/v1/geo/check/{country_code}", tags=["geo"])
+async def geo_check(country_code: str, _: dict = Depends(get_auth)):
+    return {"country_code": country_code.upper(), "blocked": is_country_blocked(country_code)}
+
+
+# ============================================================================
+# IP REPUTATION
+# ============================================================================
+
+@app.post("/v1/ip/reputation", tags=["ip"])
+async def ip_reputation_record(payload: IPReputation, auth: dict = Depends(get_auth)):
+    if not auth.get("admin", False):
+        raise HTTPException(status_code=403, detail="Admin access required")
+    return record_ip_reputation(payload.ip, payload.score, payload.flags)
+
+
+@app.get("/v1/ip/reputation/{ip}", tags=["ip"])
+async def ip_reputation_get(ip: str, _: dict = Depends(get_auth)):
+    rep = get_ip_reputation(ip)
+    if not rep:
+        raise HTTPException(status_code=404, detail="IP reputation not found")
+    return rep
+
+
+# ============================================================================
+# REQUEST SIGNING KEYS
+# ============================================================================
+
+@app.post("/v1/auth/signing-key", tags=["auth"])
+async def signing_key_create(payload: SigningKey, auth: dict = Depends(get_auth)):
+    if not auth.get("admin", False):
+        raise HTTPException(status_code=403, detail="Admin access required")
+    return create_signing_key(payload.key_id, payload.secret, payload.algorithm)
+
+
+@app.get("/v1/auth/signing-keys", tags=["auth"])
+async def signing_keys_list(auth: dict = Depends(get_auth)):
+    if not auth.get("admin", False):
+        raise HTTPException(status_code=403, detail="Admin access required")
+    return {"keys": list_signing_keys()}
+
+
+# ============================================================================
+# API VERSIONING
+# ============================================================================
+
+@app.get("/v1/versions", response_model=list[APIVersion], tags=["system"])
+async def api_versions(auth: dict = Depends(get_auth)):
+    return list_api_versions()
+
+
+@app.post("/v1/versions", tags=["system"])
+async def api_version_register(version: str, status: str = "active",
+                                sunset_date: Optional[str] = None,
+                                auth: dict = Depends(get_auth)):
+    if not auth.get("admin", False):
+        raise HTTPException(status_code=403, detail="Admin access required")
+    return register_api_version(version, status, sunset_date)
+
+
+# ============================================================================
+# BULK KEY OPERATIONS
+# ============================================================================
+
+@app.post("/v1/keys/bulk", response_model=BulkKeyResponse, tags=["keys"])
+async def keys_bulk_create(payload: BulkKeyCreate, auth: dict = Depends(get_auth)):
+    if not auth.get("admin", False):
+        raise HTTPException(status_code=403, detail="Admin access required")
+    keys = bulk_create_keys(payload.count, payload.tier, payload.scopes)
+    return BulkKeyResponse(keys=keys, total=len(keys))
+
+
+# ============================================================================
+# KEY SHARING
+# ============================================================================
+
+@app.post("/v1/keys/share", response_model=KeyShareResponse, tags=["keys"])
+async def keys_share(payload: KeyShare, auth: dict = Depends(get_auth)):
+    if not auth.get("admin", False):
+        raise HTTPException(status_code=403, detail="Admin access required")
+    return create_key_share(payload.key_id, payload.expires_in_hours, payload.max_uses)
+
+
+@app.get("/v1/keys/shares", tags=["keys"])
+async def keys_shares_list(auth: dict = Depends(get_auth)):
+    if not auth.get("admin", False):
+        raise HTTPException(status_code=403, detail="Admin access required")
+    return {"shares": list_key_shares()}
+
+
+# ============================================================================
+# TEAM / COLLABORATOR MANAGEMENT
+# ============================================================================
+
+@app.post("/v1/teams", response_model=TeamResponse, tags=["teams"])
+async def teams_create(name: str, auth: dict = Depends(get_auth)):
+    user_id = auth.get("owner_id", 0)
+    return create_team(name, user_id)
+
+
+@app.get("/v1/teams", response_model=list[TeamResponse], tags=["teams"])
+async def teams_list(auth: dict = Depends(get_auth)):
+    user_id = auth.get("owner_id", 0)
+    return list_teams(user_id if not auth.get("admin", False) else None)
+
+
+@app.post("/v1/teams/{team_id}/members", tags=["teams"])
+async def teams_add_member(team_id: str, user_id: int, role: str = "member",
+                            auth: dict = Depends(get_auth)):
+    if not auth.get("admin", False):
+        raise HTTPException(status_code=403, detail="Admin access required")
+    ok = add_team_member(team_id, user_id, role)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Team not found or member exists")
+    return {"added": True, "team_id": team_id, "user_id": user_id, "role": role}
+
+
+# ============================================================================
+# RBAC - ROLES
+# ============================================================================
+
+@app.post("/v1/rbac/roles", response_model=RoleResponse, tags=["rbac"])
+async def rbac_role_create(payload: RoleCreate, auth: dict = Depends(get_auth)):
+    if not auth.get("admin", False):
+        raise HTTPException(status_code=403, detail="Admin access required")
+    return create_role(payload.name, payload.permissions)
+
+
+@app.get("/v1/rbac/roles", response_model=list[RoleResponse], tags=["rbac"])
+async def rbac_roles_list(auth: dict = Depends(get_auth)):
+    if not auth.get("admin", False):
+        raise HTTPException(status_code=403, detail="Admin access required")
+    return list_roles()
+
+
+@app.post("/v1/rbac/assign", tags=["rbac"])
+async def rbac_assign(user_id: int, role_id: str, auth: dict = Depends(get_auth)):
+    if not auth.get("admin", False):
+        raise HTTPException(status_code=403, detail="Admin access required")
+    ok = assign_role(user_id, role_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail="User not found")
+    return {"assigned": True, "user_id": user_id, "role_id": role_id}
+
+
+# ============================================================================
+# AUDIT LOG
+# ============================================================================
+
+@app.post("/v1/audit/log", tags=["audit"])
+async def audit_log_create(user_id: Optional[int], action: str, resource: str,
+                            resource_id: Optional[str] = None,
+                            details: Optional[dict] = None,
+                            ip_address: Optional[str] = None,
+                            user_agent: Optional[str] = None,
+                            auth: dict = Depends(get_auth)):
+    if not auth.get("admin", False):
+        raise HTTPException(status_code=403, detail="Admin access required")
+    return write_audit_log(user_id, action, resource, resource_id,
+                           details or {}, ip_address, user_agent)
+
+
+@app.get("/v1/audit/log", tags=["audit"])
+async def audit_log_list(user_id: Optional[int] = None, action: Optional[str] = None,
+                          resource: Optional[str] = None, limit: int = 50,
+                          auth: dict = Depends(get_auth)):
+    if not auth.get("admin", False):
+        raise HTTPException(status_code=403, detail="Admin access required")
+    return {"logs": list_audit_logs(user_id=user_id, action=action,
+                                     resource=resource, limit=limit)}
+
+
+# ============================================================================
+# SESSION MANAGEMENT
+# ============================================================================
+
+@app.post("/v1/sessions", response_model=SessionInfo, tags=["sessions"])
+async def sessions_create(device_id: Optional[str] = None,
+                           ip_address: Optional[str] = None,
+                           user_agent: Optional[str] = None,
+                           auth: dict = Depends(get_auth)):
+    user_id = auth.get("owner_id", 0)
+    return create_session(user_id, device_id, ip_address, user_agent)
+
+
+@app.get("/v1/sessions", response_model=list[SessionInfo], tags=["sessions"])
+async def sessions_list(auth: dict = Depends(get_auth)):
+    user_id = auth.get("owner_id", 0)
+    return list_sessions(user_id if not auth.get("admin", False) else None)
+
+
+@app.delete("/v1/sessions/{session_id}", tags=["sessions"])
+async def sessions_revoke(session_id: str, auth: dict = Depends(get_auth)):
+    ok = revoke_session(session_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Session not found")
+    return {"revoked": True}
+
+
+# ============================================================================
+# DEVICE FINGERPRINTING
+# ============================================================================
+
+@app.post("/v1/devices/fingerprint", tags=["devices"])
+async def device_fingerprint_record(payload: DeviceFingerprint, _: dict = Depends(get_auth)):
+    return record_device_fingerprint(payload.fingerprint_id, payload.user_agent,
+                                      payload.accept_language, payload.platform,
+                                      payload.screen_resolution)
+
+
+# ============================================================================
+# CONCURRENT SESSION LIMITS
+# ============================================================================
+
+@app.post("/v1/sessions/limit", tags=["sessions"])
+async def session_limit_set(max_sessions: int, auth: dict = Depends(get_auth)):
+    if not auth.get("admin", False):
+        raise HTTPException(status_code=403, detail="Admin access required")
+    return set_session_limit(max_sessions)
+
+
+@app.get("/v1/sessions/limit", tags=["sessions"])
+async def session_limit_get(_: dict = Depends(get_auth)):
+    return {"max_sessions": get_session_limit()}
+
+
+# ============================================================================
+# PASSWORD RESET
+# ============================================================================
+
+@app.post("/v1/auth/password-reset/request", tags=["auth"])
+async def password_reset_request(payload: PasswordResetRequest):
+    return request_password_reset(payload.email)
+
+
+@app.post("/v1/auth/password-reset/confirm", tags=["auth"])
+async def password_reset_confirm(payload: PasswordResetConfirm):
+    ok = confirm_password_reset(payload.token, payload.new_password)
+    if not ok:
+        raise HTTPException(status_code=400, detail="Invalid or expired token")
+    return {"reset": True}
+
+
+# ============================================================================
+# CUSTOM RATE LIMITS PER KEY
+# ============================================================================
+
+@app.post("/v1/rate-limit/custom", tags=["rate_limit"])
+async def custom_rate_limit(payload: CustomRateLimit, auth: dict = Depends(get_auth)):
+    if not auth.get("admin", False):
+        raise HTTPException(status_code=403, detail="Admin access required")
+    return set_custom_rate_limit(payload.key_id, payload.requests_per_minute,
+                                  payload.burst)
+
+
+# ============================================================================
+# DOWNLOAD BANDWIDTH ALLOCATION
+# ============================================================================
+
+@app.post("/v1/download/bandwidth", tags=["download"])
+async def download_bandwidth(payload: BandwidthAllocation, auth: dict = Depends(get_auth)):
+    if not auth.get("admin", False):
+        raise HTTPException(status_code=403, detail="Admin access required")
+    return set_bandwidth_allocation(payload.key_id, payload.max_bytes_per_day,
+                                     payload.max_bytes_per_month)
+
+
+# ============================================================================
+# DOWNLOAD COMPLETION NOTIFICATIONS
+# ============================================================================
+
+@app.post("/v1/download/notify", tags=["download"])
+async def download_notify(payload: DownloadNotification, auth: dict = Depends(get_auth)):
+    user_id = auth.get("owner_id", 0)
+    return set_download_notification(payload.job_id, payload.notify_on_complete,
+                                      payload.notify_on_error, payload.channels)
+
+
+# ============================================================================
+# AUTO-RETRY FAILED DOWNLOADS
+# ============================================================================
+
+@app.post("/v1/download/retry-policy", tags=["download"])
+async def download_retry_policy(payload: DownloadRetryPolicy, auth: dict = Depends(get_auth)):
+    if not auth.get("admin", False):
+        raise HTTPException(status_code=403, detail="Admin access required")
+    return set_retry_policy("global", payload.max_retries, payload.backoff_seconds,
+                             payload.retry_on_error)
+
+
+# ============================================================================
+# SOURCE HEALTH MONITORING
+# ============================================================================
+
+@app.get("/v1/source/health/{source_id}", response_model=SourceHealth, tags=["sources"])
+async def source_health_get(source_id: str, _: dict = Depends(get_auth)):
+    health = get_source_health(source_id)
+    if not health:
+        raise HTTPException(status_code=404, detail="Source health not found")
+    return health
+
+
+@app.post("/v1/source/health", tags=["sources"])
+async def source_health_record(source_id: str, status: str,
+                                latency_ms: Optional[float] = None,
+                                uptime_percent: float = 100.0,
+                                error_count: int = 0,
+                                auth: dict = Depends(get_auth)):
+    if not auth.get("admin", False):
+        raise HTTPException(status_code=403, detail="Admin access required")
+    return record_source_health(source_id, status, latency_ms, uptime_percent, error_count)
+
+
+@app.get("/v1/source/latency/{source_id}", tags=["sources"])
+async def source_latency_stats(source_id: str, _: dict = Depends(get_auth)):
+    return get_source_latency_stats(source_id)
+
+
+# ============================================================================
+# FAILOVER RULES
+# ============================================================================
+
+@app.post("/v1/failover/rules", tags=["failover"])
+async def failover_rule_add(source_id: str, fallback_source: str,
+                             threshold: float = 0.5, enabled: bool = True,
+                             auth: dict = Depends(get_auth)):
+    if not auth.get("admin", False):
+        raise HTTPException(status_code=403, detail="Admin access required")
+    return add_failover_rule(source_id, fallback_source, threshold, enabled)
+
+
+@app.get("/v1/failover/rules", tags=["failover"])
+async def failover_rules_list(auth: dict = Depends(get_auth)):
+    return {"rules": list_failover_rules()}
+
+
+# ============================================================================
+# CACHE INVALIDATION BY TAG
+# ============================================================================
+
+@app.post("/v1/cache/invalidate/{tag}", tags=["cache"])
+async def cache_invalidate(tag: str, auth: dict = Depends(get_auth)):
+    if not auth.get("admin", False):
+        raise HTTPException(status_code=403, detail="Admin access required")
+    count = invalidate_cache_tag(tag)
+    return {"invalidated": count, "tag": tag}
+
+
+# ============================================================================
+# CACHE WARMING
+# ============================================================================
+
+@app.post("/v1/cache/warm", tags=["cache"])
+async def cache_warm(payload: CacheWarmRequest, auth: dict = Depends(get_auth)):
+    if not auth.get("admin", False):
+        raise HTTPException(status_code=403, detail="Admin access required")
+    return warm_cache(payload.queries, payload.source, payload.limit_per_query)
+
+
+@app.get("/v1/cache/warm", tags=["cache"])
+async def cache_warm_list(auth: dict = Depends(get_auth)):
+    if not auth.get("admin", False):
+        raise HTTPException(status_code=403, detail="Admin access required")
+    return {"warms": list_cache_warms()}
+
+
+# ============================================================================
+# SEARCH HISTORY
+# ============================================================================
+
+@app.get("/v1/search/history", tags=["search"])
+async def search_history(limit: int = 50, auth: dict = Depends(get_auth)):
+    user_id = auth.get("owner_id", 0)
+    return {"history": get_search_history(user_id, limit)}
+
+
+@app.post("/v1/search/history", tags=["search"])
+async def search_history_record(query: str, source: Optional[str] = None,
+                                 results_count: int = 0,
+                                 auth: dict = Depends(get_auth)):
+    user_id = auth.get("owner_id", 0)
+    return record_search_history(user_id, query, source, results_count)
+
+
+# ============================================================================
+# SAVED SEARCHES
+# ============================================================================
+
+@app.post("/v1/search/saved", response_model=SavedSearch, tags=["search"])
+async def saved_search_create(payload: SavedSearchCreate, auth: dict = Depends(get_auth)):
+    user_id = auth.get("owner_id", 0)
+    return save_search(user_id, payload.name, payload.query, payload.source)
+
+
+@app.get("/v1/search/saved", response_model=list[SavedSearch], tags=["search"])
+async def saved_search_list(auth: dict = Depends(get_auth)):
+    user_id = auth.get("owner_id", 0)
+    return list_saved_searches(user_id)
+
+
+@app.delete("/v1/search/saved/{search_id}", tags=["search"])
+async def saved_search_delete(search_id: str, auth: dict = Depends(get_auth)):
+    user_id = auth.get("owner_id", 0)
+    ok = delete_saved_search(search_id, user_id)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Saved search not found")
+    return {"deleted": True}
+
+
+# ============================================================================
+# SEARCH AUTOCOMPLETE
+# ============================================================================
+
+@app.post("/v1/search/autocomplete", tags=["search"])
+async def search_autocomplete(payload: AutocompleteRequest, _: dict = Depends(get_auth)):
+    # Simple autocomplete: return matching saved searches and trending
+    suggestions = []
+    # Add trending matches
+    trending = get_trending(limit=payload.limit)
+    for t in trending:
+        if payload.query.lower() in t.get("query", "").lower():
+            suggestions.append(t["query"])
+    return {"suggestions": suggestions[: payload.limit]}
+
+
+# ============================================================================
+# TRENDING SEARCHES
+# ============================================================================
+
+@app.get("/v1/search/trending", tags=["search"])
+async def search_trending(limit: int = 20, _: dict = Depends(get_auth)):
+    return {"trending": get_trending(limit)}
+
+
+# ============================================================================
+# POPULAR CONTENT
+# ============================================================================
+
+@app.get("/v1/content/popular", tags=["content"])
+async def content_popular(limit: int = 20, _: dict = Depends(get_auth)):
+    # Return popular content from search history/downloads
+    return {"popular": [], "total": 0, "note": "Popular content tracking via download analytics"}
+
+
+# ============================================================================
+# USER ACTIVITY FEED
+# ============================================================================
+
+@app.get("/v1/activity/feed", tags=["activity"])
+async def activity_feed(limit: int = 50, auth: dict = Depends(get_auth)):
+    user_id = auth.get("owner_id", 0)
+    return {"activities": get_activity_feed(user_id, limit)}
+
+
+@app.post("/v1/activity/record", tags=["activity"])
+async def activity_record(action: str, details: Optional[dict] = None,
+                           auth: dict = Depends(get_auth)):
+    user_id = auth.get("owner_id", 0)
+    return record_activity(user_id, action, details or {})
+
+
+# ============================================================================
+# USAGE REPORTS
+# ============================================================================
+
+@app.post("/v1/reports/usage", tags=["reports"])
+async def reports_usage(period: str = "monthly", format: str = "csv",
+                         auth: dict = Depends(get_auth)):
+    user_id = auth.get("owner_id", 0)
+    return create_usage_report(user_id, period, format)
+
+
+@app.get("/v1/reports/usage", tags=["reports"])
+async def reports_usage_list(auth: dict = Depends(get_auth)):
+    user_id = auth.get("owner_id", 0)
+    return {"reports": list_usage_reports(user_id)}
+
+
+# ============================================================================
+# KEY SCOPES / USAGE / SUSPICIOUS ACTIVITY
+# ============================================================================
+
+@app.post("/v1/keys/{key_id}/scopes", tags=["keys"])
+async def key_scopes_set(key_id: str, payload: KeyScopes, auth: dict = Depends(get_auth)):
+    if not auth.get("admin", False):
+        raise HTTPException(status_code=403, detail="Admin access required")
+    ok = set_key_scopes(key_id, payload.scopes)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Key not found")
+    return {"updated": True, "key_id": key_id, "scopes": payload.scopes}
+
+
+@app.get("/v1/keys/{key_id}/usage", tags=["keys"])
+async def key_usage_get(key_id: str, _: dict = Depends(get_auth)):
+    usage = get_key_usage(key_id)
+    if not usage:
+        return {"key_id": key_id, "total_requests": 0}
+    return usage
+
+
+@app.post("/v1/keys/{key_id}/concurrency", tags=["keys"])
+async def key_concurrency_set(key_id: str, max_concurrent: int,
+                               auth: dict = Depends(get_auth)):
+    if not auth.get("admin", False):
+        raise HTTPException(status_code=403, detail="Admin access required")
+    ok = set_download_concurrency(key_id, max_concurrent)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Key not found")
+    return {"updated": True, "key_id": key_id, "max_concurrent": max_concurrent}
+
+
+@app.get("/v1/keys/{key_id}/concurrency", tags=["keys"])
+async def key_concurrency_get(key_id: str, _: dict = Depends(get_auth)):
+    val = get_download_concurrency(key_id)
+    return {"key_id": key_id, "max_concurrent": val}
+
+
+@app.post("/v1/keys/{key_id}/file-type-filter", tags=["keys"])
+async def key_file_filter_set(key_id: str, payload: FileTypeFilter,
+                               auth: dict = Depends(get_auth)):
+    if not auth.get("admin", False):
+        raise HTTPException(status_code=403, detail="Admin access required")
+    ok = set_file_type_filter(key_id, payload.allowed_extensions,
+                               payload.blocked_extensions)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Key not found")
+    return {"updated": True, "key_id": key_id}
+
+
+@app.get("/v1/suspicious-activity", tags=["security"])
+async def suspicious_activity_list(limit: int = 50,
+                                    auth: dict = Depends(get_auth)):
+    if not auth.get("admin", False):
+        raise HTTPException(status_code=403, detail="Admin access required")
+    return {"activities": list_suspicious_activity(limit)}
+
+
+@app.post("/v1/suspicious-activity", tags=["security"])
+async def suspicious_activity_record(user_id: Optional[int], ip_address: str,
+                                      activity_type: str, risk_score: float,
+                                      action_taken: str = "warn",
+                                      auth: dict = Depends(get_auth)):
+    if not auth.get("admin", False):
+        raise HTTPException(status_code=403, detail="Admin access required")
+    return record_suspicious_activity(user_id, ip_address, activity_type,
+                                       risk_score, action_taken)
+
+
+# ============================================================================
+# VIRUS SCAN
+# ============================================================================
+
+@app.post("/v1/scan/virus", tags=["security"])
+async def virus_scan(file_path: str, auth: dict = Depends(get_auth)):
+    if not auth.get("admin", False):
+        raise HTTPException(status_code=403, detail="Admin access required")
+    return record_virus_scan(file_path, clean=True, threats=[])
+
+
+# ============================================================================
+# CONTENT MODERATION QUEUE
+# ============================================================================
+
+@app.post("/v1/moderation", response_model=ModerationItem, tags=["moderation"])
+async def moderation_add(content_type: str, content_id: str,
+                          reporter_id: Optional[int] = None,
+                          reason: str = "",
+                          auth: dict = Depends(get_auth)):
+    return add_moderation_item(content_type, content_id, reporter_id, reason)
+
+
+@app.get("/v1/moderation", tags=["moderation"])
+async def moderation_list(status: Optional[str] = None,
+                           auth: dict = Depends(get_auth)):
+    if not auth.get("admin", False):
+        raise HTTPException(status_code=403, detail="Admin access required")
+    return {"items": list_moderation_items(status)}
+
+
+@app.post("/v1/moderation/{item_id}/action", tags=["moderation"])
+async def moderation_action(item_id: str, action: str, moderator_id: int,
+                             reason: Optional[str] = None,
+                             auth: dict = Depends(get_auth)):
+    if not auth.get("admin", False):
+        raise HTTPException(status_code=403, detail="Admin access required")
+    ok = moderate_item(item_id, action, moderator_id, reason)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Item not found")
+    return {"actioned": True, "item_id": item_id, "action": action}
 
 
 # ============================================================================

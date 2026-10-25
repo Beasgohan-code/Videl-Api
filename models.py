@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import datetime
+from enum import Enum
 from typing import Any, Optional
 
 from pydantic import BaseModel, Field
@@ -20,7 +21,7 @@ class ErrorResponse(BaseModel):
 
 class HealthResponse(BaseModel):
     status: str
-    version: str = "2.0.0"
+    version: str = "3.2.0"
     sources: int
     uptime_seconds: float
     features: dict[str, bool] = {}
@@ -725,3 +726,716 @@ class VersionInfo(BaseModel):
     build: str
     features: list[str]
     api_version: str
+
+
+# ============================================================================
+# OAUTH2 / JWT
+# ============================================================================
+
+class TokenRequest(BaseModel):
+    grant_type: str = "client_credentials"
+    scope: Optional[str] = None
+
+
+class TokenResponse(BaseModel):
+    access_token: str
+    token_type: str = "Bearer"
+    expires_in: int
+    scope: Optional[str] = None
+
+
+class TokenRefreshRequest(BaseModel):
+    refresh_token: str
+
+
+# ============================================================================
+# TWO-FACTOR AUTHENTICATION
+# ============================================================================
+
+class TwoFactorSetup(BaseModel):
+    user_id: int
+
+
+class TwoFactorVerify(BaseModel):
+    user_id: int
+    token: str
+
+
+class TwoFactorResponse(BaseModel):
+    enabled: bool
+    secret: Optional[str] = None
+    qr_code: Optional[str] = None
+    backup_codes: list[str] = []
+
+
+# ============================================================================
+# NOTIFICATIONS - EMAIL / SMS / PUSH
+# ============================================================================
+
+class EmailNotification(BaseModel):
+    to: str
+    subject: str
+    body: str
+    html: Optional[str] = None
+
+
+class SMSNotification(BaseModel):
+    to: str
+    message: str
+
+
+class PushSubscription(BaseModel):
+    endpoint: str
+    keys: dict  # {p256dh, auth}
+
+
+class PushNotification(BaseModel):
+    subscription: PushSubscription
+    title: str
+    body: str
+    icon: Optional[str] = None
+    url: Optional[str] = None
+
+
+class NotificationPreference(BaseModel):
+    email: bool = True
+    sms: bool = False
+    push: bool = True
+    download_complete: bool = True
+    payment_received: bool = True
+    system_alerts: bool = False
+    marketing: bool = False
+
+
+# ============================================================================
+# FILE ENCRYPTION
+# ============================================================================
+
+class FileEncryptRequest(BaseModel):
+    file_path: str
+    password: str
+
+
+class FileDecryptRequest(BaseModel):
+    file_path: str
+    password: str
+
+
+class FileEncryptResponse(BaseModel):
+    encrypted_path: str
+    algorithm: str = "AES-256-GCM"
+
+
+# ============================================================================
+# DOWNLOAD SPEED LIMITING
+# ============================================================================
+
+class SpeedLimitRequest(BaseModel):
+    key_id: str
+    max_kbps: int  # kilobits per second
+
+
+class SpeedLimitResponse(BaseModel):
+    key_id: str
+    max_kbps: int
+    active: bool
+
+
+# ============================================================================
+# DOWNLOAD SCHEDULING
+# ============================================================================
+
+class DownloadSchedule(BaseModel):
+    url: str
+    source: Optional[str] = None
+    cron_expression: str  # e.g. "0 2 * * *"
+    format: str = "bestaudio/best"
+    enabled: bool = True
+
+
+class DownloadScheduleResponse(BaseModel):
+    schedule_id: str
+    url: str
+    cron_expression: str
+    next_run: Optional[str] = None
+    enabled: bool
+
+
+# ============================================================================
+# CONTENT RATING
+# ============================================================================
+
+class ContentRating(BaseModel):
+    content_id: str
+    rating: int = Field(..., ge=1, le=5)
+    review: Optional[str] = Field(default=None, max_length=500)
+
+
+class ContentRatingResponse(BaseModel):
+    content_id: str
+    average_rating: float
+    total_ratings: int
+    user_rating: Optional[int] = None
+
+
+# ============================================================================
+# FAVORITES / BOOKMARKS
+# ============================================================================
+
+class FavoriteCreate(BaseModel):
+    title: str
+    url: str
+    source: Optional[str] = None
+    thumbnail: Optional[str] = None
+    tags: list[str] = []
+
+
+class FavoriteResponse(BaseModel):
+    id: str
+    title: str
+    url: str
+    source: Optional[str]
+    thumbnail: Optional[str]
+    tags: list[str]
+    created_at: str
+
+
+# ============================================================================
+# DOWNLOAD HISTORY EXPORT
+# ============================================================================
+
+class ExportFormat(str, Enum):
+    JSON = "json"
+    CSV = "csv"
+
+
+class HistoryExportRequest(BaseModel):
+    format: ExportFormat = ExportFormat.JSON
+    date_from: Optional[str] = None
+    date_to: Optional[str] = None
+
+
+# ============================================================================
+# API ANALYTICS PER ENDPOINT
+# ============================================================================
+
+class EndpointStats(BaseModel):
+    endpoint: str
+    method: str
+    total_requests: int
+    avg_response_time_ms: float
+    error_count: int
+    last_accessed: Optional[str] = None
+
+
+# ============================================================================
+# WEBHOOK RETRY / EVENT FILTERING
+# ============================================================================
+
+class WebhookDelivery(BaseModel):
+    webhook_id: str
+    event: str
+    status: str  # pending, delivered, failed
+    attempt: int
+    next_retry: Optional[str] = None
+
+
+class WebhookEventFilter(BaseModel):
+    events: list[str]
+    secret: Optional[str] = None
+
+
+# ============================================================================
+# API KEY AUTO-ROTATION
+# ============================================================================
+
+class KeyRotationSchedule(BaseModel):
+    key_id: str
+    interval_days: int
+    enabled: bool = True
+
+
+# ============================================================================
+# TIER FEATURE FLAGS
+# ============================================================================
+
+class TierFeatureFlag(BaseModel):
+    tier: str
+    feature: str
+    enabled: bool
+
+
+# ============================================================================
+# GEO-BLOCKING
+# ============================================================================
+
+class GeoBlockRule(BaseModel):
+    country_code: str  # ISO 3166-1 alpha-2
+    blocked: bool = True
+    reason: Optional[str] = None
+
+
+# ============================================================================
+# IP REPUTATION
+# ============================================================================
+
+class IPReputation(BaseModel):
+    ip: str
+    score: float = Field(..., ge=0, le=100)
+    flags: list[str] = []
+    last_checked: str
+
+
+# ============================================================================
+# REQUEST SIGNING (HMAC)
+# ============================================================================
+
+class SigningKey(BaseModel):
+    key_id: str
+    secret: str
+    algorithm: str = "HMAC-SHA256"
+
+
+# ============================================================================
+# API VERSIONING / DEPRECATION
+# ============================================================================
+
+class APIVersion(BaseModel):
+    version: str
+    status: str  # active, deprecated, sunset
+    sunset_date: Optional[str] = None
+
+
+# ============================================================================
+# BULK KEY OPERATIONS
+# ============================================================================
+
+class BulkKeyCreate(BaseModel):
+    count: int = Field(..., ge=1, le=100)
+    tier: str = "free"
+    scopes: list[str] = ["read", "search"]
+
+
+class BulkKeyResponse(BaseModel):
+    keys: list[dict]
+    total: int
+
+
+# ============================================================================
+# KEY SHARING
+# ============================================================================
+
+class KeyShare(BaseModel):
+    key_id: str
+    expires_in_hours: int = 24
+    max_uses: Optional[int] = None
+
+
+class KeyShareResponse(BaseModel):
+    share_url: str
+    expires_at: str
+    max_uses: Optional[int] = None
+
+
+# ============================================================================
+# TEAM / COLLABORATOR MANAGEMENT
+# ============================================================================
+
+class TeamMember(BaseModel):
+    user_id: int
+    role: str  # admin, member, viewer
+    key_id: Optional[str] = None
+
+
+class TeamResponse(BaseModel):
+    team_id: str
+    name: str
+    members: list[TeamMember]
+    owner_id: int
+
+
+# ============================================================================
+# RBAC - ROLE-BASED ACCESS CONTROL
+# ============================================================================
+
+class RoleCreate(BaseModel):
+    name: str
+    permissions: list[str]
+
+
+class RoleResponse(BaseModel):
+    role_id: str
+    name: str
+    permissions: list[str]
+
+
+class UserRoleAssign(BaseModel):
+    user_id: int
+    role_id: str
+
+
+# ============================================================================
+# AUDIT LOG
+# ============================================================================
+
+class AuditLogEntry(BaseModel):
+    id: str
+    user_id: Optional[int]
+    action: str
+    resource: str
+    resource_id: Optional[str]
+    details: dict
+    ip_address: Optional[str]
+    user_agent: Optional[str]
+    timestamp: str
+
+
+class AuditLogFilter(BaseModel):
+    user_id: Optional[int] = None
+    action: Optional[str] = None
+    resource: Optional[str] = None
+    date_from: Optional[str] = None
+    date_to: Optional[str] = None
+    limit: int = Field(default=50, ge=1, le=500)
+
+
+# ============================================================================
+# SESSION MANAGEMENT
+# ============================================================================
+
+class SessionInfo(BaseModel):
+    session_id: str
+    user_id: int
+    device_id: Optional[str]
+    ip_address: Optional[str]
+    user_agent: Optional[str]
+    created_at: str
+    last_active: str
+    active: bool
+
+
+class SessionRevoke(BaseModel):
+    session_id: str
+
+
+# ============================================================================
+# DEVICE FINGERPRINTING
+# ============================================================================
+
+class DeviceFingerprint(BaseModel):
+    fingerprint_id: str
+    user_agent: str
+    accept_language: str
+    platform: str
+    screen_resolution: Optional[str] = None
+
+
+# ============================================================================
+# CONCURRENT SESSION LIMITS
+# ============================================================================
+
+class SessionLimit(BaseModel):
+    max_sessions: int = Field(..., ge=1, le=100)
+
+
+# ============================================================================
+# PASSWORD RESET
+# ============================================================================
+
+class PasswordResetRequest(BaseModel):
+    email: str
+
+
+class PasswordResetConfirm(BaseModel):
+    token: str
+    new_password: str
+
+
+# ============================================================================
+# CUSTOM RATE LIMITS PER KEY
+# ============================================================================
+
+class CustomRateLimit(BaseModel):
+    key_id: str
+    requests_per_minute: int = Field(..., ge=1)
+    burst: Optional[int] = None
+
+
+# ============================================================================
+# DOWNLOAD BANDWIDTH ALLOCATION
+# ============================================================================
+
+class BandwidthAllocation(BaseModel):
+    key_id: str
+    max_bytes_per_day: int
+    max_bytes_per_month: int
+
+
+# ============================================================================
+# DOWNLOAD COMPLETION NOTIFICATIONS
+# ============================================================================
+
+class DownloadNotification(BaseModel):
+    job_id: str
+    notify_on_complete: bool = True
+    notify_on_error: bool = True
+    channels: list[str] = ["websocket"]  # websocket, email, push
+
+
+# ============================================================================
+# AUTO-RETRY FAILED DOWNLOADS
+# ============================================================================
+
+class DownloadRetryPolicy(BaseModel):
+    max_retries: int = Field(default=3, ge=0, le=10)
+    backoff_seconds: int = Field(default=60, ge=10, le=3600)
+    retry_on_error: bool = True
+
+
+# ============================================================================
+# SOURCE HEALTH MONITORING
+# ============================================================================
+
+class SourceHealth(BaseModel):
+    source_id: str
+    status: str  # healthy, degraded, down
+    latency_ms: Optional[float]
+    uptime_percent: float
+    last_checked: str
+    error_count_24h: int
+
+
+# ============================================================================
+# SOURCE LATENCY TRACKING
+# ============================================================================
+
+class SourceLatency(BaseModel):
+    source_id: str
+    avg_latency_ms: float
+    min_latency_ms: float
+    max_latency_ms: float
+    sample_count: int
+
+
+# ============================================================================
+# AUTOMATED FAILOVER
+# ============================================================================
+
+class FailoverRule(BaseModel):
+    source_id: str
+    fallback_source: str
+    threshold: float = 0.5  # error rate threshold
+    enabled: bool = True
+
+
+# ============================================================================
+# CACHE INVALIDATION BY TAG
+# ============================================================================
+
+class CacheInvalidation(BaseModel):
+    tag: str
+    pattern: Optional[str] = None
+
+
+# ============================================================================
+# CACHE WARMING
+# ============================================================================
+
+class CacheWarmRequest(BaseModel):
+    queries: list[str]
+    source: str = "youtube"
+    limit_per_query: int = 5
+
+
+# ============================================================================
+# SEARCH HISTORY
+# ============================================================================
+
+class SearchHistoryEntry(BaseModel):
+    id: str
+    user_id: int
+    query: str
+    source: Optional[str]
+    results_count: int
+    timestamp: str
+
+
+# ============================================================================
+# SAVED SEARCHES
+# ============================================================================
+
+class SavedSearch(BaseModel):
+    id: str
+    user_id: int
+    name: str
+    query: str
+    source: Optional[str]
+    created_at: str
+
+
+class SavedSearchCreate(BaseModel):
+    name: str
+    query: str
+    source: Optional[str] = None
+
+
+# ============================================================================
+# SEARCH AUTOCOMPLETE
+# ============================================================================
+
+class AutocompleteRequest(BaseModel):
+    query: str
+    source: Optional[str] = None
+    limit: int = Field(default=10, ge=1, le=50)
+
+
+# ============================================================================
+# TRENDING SEARCHES
+# ============================================================================
+
+class TrendingSearch(BaseModel):
+    query: str
+    count: int
+    trend: str  # up, down, stable
+
+
+# ============================================================================
+# POPULAR CONTENT
+# ============================================================================
+
+class PopularContent(BaseModel):
+    title: str
+    url: str
+    source: str
+    download_count: int
+    rating: Optional[float]
+
+
+# ============================================================================
+# USER ACTIVITY FEED
+# ============================================================================
+
+class ActivityFeedEntry(BaseModel):
+    id: str
+    user_id: int
+    action: str  # download, search, key_create, etc.
+    details: dict
+    timestamp: str
+
+
+# ============================================================================
+# USAGE REPORTS CSV
+# ============================================================================
+
+class UsageReport(BaseModel):
+    report_id: str
+    user_id: int
+    period: str  # daily, weekly, monthly
+    format: str = "csv"
+    download_url: str
+    expires_at: str
+
+
+# ============================================================================
+# KEY SCOPE INHERITANCE / CUSTOM SCOPES
+# ============================================================================
+
+class KeyScopes(BaseModel):
+    key_id: str
+    scopes: list[str]
+
+
+# ============================================================================
+# KEY LAST-USED TRACKING
+# ============================================================================
+
+class KeyUsage(BaseModel):
+    key_id: str
+    last_used: Optional[str]
+    total_requests: int
+    requests_today: int
+    requests_month: int
+
+
+# ============================================================================
+# SUSPICIOUS ACTIVITY DETECTION
+# ============================================================================
+
+class SuspiciousActivity(BaseModel):
+    id: str
+    user_id: Optional[int]
+    ip_address: str
+    activity_type: str
+    risk_score: float = Field(..., ge=0, le=100)
+    detected_at: str
+    action_taken: str  # none, warn, block, require_2fa
+
+
+# ============================================================================
+# DOWNLOAD CONCURRENCY PER KEY
+# ============================================================================
+
+class DownloadConcurrency(BaseModel):
+    key_id: str
+    max_concurrent: int = Field(..., ge=1, le=20)
+
+
+# ============================================================================
+# FILE TYPE FILTERING
+# ============================================================================
+
+class FileTypeFilter(BaseModel):
+    allowed_extensions: list[str]  # e.g. [".mp3", ".m4a", ".flac"]
+    blocked_extensions: list[str] = []
+
+
+# ============================================================================
+# VIRUS SCAN (placeholder)
+# ============================================================================
+
+class VirusScanResult(BaseModel):
+    file_path: str
+    clean: bool
+    threats: list[str] = []
+    scanned_at: str
+
+
+# ============================================================================
+# CONTENT MODERATION QUEUE
+# ============================================================================
+
+class ModerationItem(BaseModel):
+    id: str
+    content_type: str  # track, playlist, comment
+    content_id: str
+    reporter_id: Optional[int]
+    reason: str
+    status: str  # pending, approved, rejected
+    created_at: str
+
+
+class ModerationAction(BaseModel):
+    item_id: str
+    action: str  # approve, reject, ban
+    moderator_id: int
+    reason: Optional[str] = None
+
+
+# ============================================================================
+# WATCHDOG / KEEP-ALIVE HEALTH
+# ============================================================================
+
+class ComponentHealthResponse(BaseModel):
+    name: str
+    healthy: bool
+    last_check: float
+    error: Optional[str] = None
+    failure_count: int = 0
+    details: dict = {}
+
+
+class WatchdogHealthResponse(BaseModel):
+    status: str  # healthy, degraded
+    uptime_seconds: float
+    check_interval: float
+    components: dict[str, ComponentHealthResponse]
