@@ -231,3 +231,98 @@ class ApiKeyRecord(BaseModel):
     active: bool = True
     created_at: Optional[datetime] = None
     last_used_at: Optional[datetime] = None
+
+
+# ---------------------------------------------------------------------------
+# M3U8 / HLS / DASH
+# ---------------------------------------------------------------------------
+
+class M3U8ParseRequest(BaseModel):
+    url: str = Field(..., min_length=1, description="M3U8/HLS playlist URL")
+    headers: Optional[dict[str, str]] = Field(default=None, description="Custom HTTP headers")
+    cookies: Optional[str] = Field(default=None, description="Cookie string")
+    proxy: Optional[str] = Field(default=None, description="Proxy URL")
+
+
+class M3U8ParseResponse(BaseModel):
+    url: str
+    is_variant: bool
+    is_media: bool
+    version: Optional[int] = None
+    target_duration: Optional[float] = None
+    media_sequence: Optional[int] = None
+    end_list: Optional[bool] = None
+    duration: float
+    playlists: list[dict] = []
+    segments: list[dict] = []
+    keys: list[dict] = []
+    media: list[dict] = []
+    iframes: list[dict] = []
+    start: Optional[dict] = None
+
+
+class M3U8DownloadRequest(BaseModel):
+    url: str = Field(..., min_length=1, description="M3U8/HLS playlist URL")
+    headers: Optional[dict[str, str]] = Field(default=None)
+    cookies: Optional[str] = Field(default=None)
+    proxy: Optional[str] = Field(default=None)
+    max_threads: int = Field(default=16, ge=1, le=64)
+    use_aria2c: bool = Field(default=False)
+    decrypt: bool = Field(default=True)
+    merge_method: str = Field(default="binary", description="binary | ffmpeg")
+    save_name: Optional[str] = Field(default=None)
+    custom_range: Optional[str] = Field(default=None, description="e.g. 0-10, 05:00-20:00")
+    audio_only: bool = Field(default=False)
+
+
+class M3U8DownloadResponse(BaseModel):
+    file_path: str
+    title: str
+    segments: int
+    duration: float
+    merge_method: str
+    decrypted: bool
+    is_variant: bool
+
+
+class M3U8JobItem(BaseModel):
+    job_id: str
+    url: str
+    status: str
+    progress: float
+    file_path: Optional[str] = None
+    error: Optional[str] = None
+    created_at: str
+    updated_at: str
+    total_segments: int = 0
+    downloaded_segments: int = 0
+    meta: dict = {}
+
+
+# ---------------------------------------------------------------------------
+# aria2 RPC
+# ---------------------------------------------------------------------------
+
+class Aria2AddRequest(BaseModel):
+    uris: list[str] = Field(..., min_length=1, description="List of URLs to download")
+    dir: Optional[str] = Field(default=None, description="Download directory")
+    out: Optional[str] = Field(default=None, description="Output filename")
+    max_connections: int = Field(default=16, ge=1, le=32)
+    split: int = Field(default=16, ge=1, le=32)
+    proxy: Optional[str] = Field(default=None)
+    header: Optional[list[str]] = Field(default=None)
+
+
+class Aria2AddResponse(BaseModel):
+    gid: str
+
+
+class Aria2StatusResponse(BaseModel):
+    gid: str
+    status: str
+    total_length: Optional[str] = None
+    completed_length: Optional[str] = None
+    download_speed: Optional[str] = None
+    progress: Optional[float] = None
+    dir: Optional[str] = None
+    files: list[dict] = []

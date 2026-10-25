@@ -22,6 +22,16 @@ Endpoints:
   POST   /v1/download/cancel/{job_id}   Cancel a job
   GET    /v1/file/{folder}/{filename}   Serve downloaded file (auto-cleanup)
   GET    /v1/stream                     Resolve direct stream URL
+  GET    /v1/m3u8/parse                 Parse M3U8/HLS playlist
+  POST   /v1/m3u8/parse                 Parse M3U8/HLS playlist (JSON)
+  POST   /v1/m3u8/download              Download M3U8/HLS stream
+  POST   /v1/m3u8/download/queue        Enqueue M3U8 background job
+  GET    /v1/m3u8/download/queue        List M3U8 jobs
+  GET    /v1/m3u8/download/status/{id}  M3U8 job status
+  POST   /v1/m3u8/download/cancel/{id}  Cancel M3U8 job
+  POST   /v1/aria2/add                  Add download to aria2 RPC
+  GET    /v1/aria2/status/{gid}         aria2 download status
+  POST   /v1/aria2/remove/{gid}         Remove aria2 download
   POST   /v1/keys                       Create a new API key
   GET    /v1/keys                       List your API keys
   DELETE /v1/keys/{key}                 Revoke an API key
@@ -29,8 +39,11 @@ Endpoints:
 
 from __future__ import annotations
 
+import asyncio
 import time
+import uuid
 from contextlib import asynccontextmanager
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
@@ -46,11 +59,33 @@ from downloader import (
     extract_info, extract_lyrics, get_job, cancel_job, list_jobs, search,
     spotdl_download_sync, JOBS,
 )
+from m3u8_downloader import (
+    parse_m3u8, download_m3u8_sync, enqueue_m3u8_download, get_m3u8_job,
+    cancel_m3u8_job, list_m3u8_jobs, aria2_add_uri, aria2_tell_status,
+    aria2_remove, M3U8Job,
+)
+from downloader import (
+    cleanup_stale_downloads, download_audio, embed_metadata, enqueue_download,
+    extract_info, extract_lyrics, get_job, cancel_job, list_jobs, search,
+    spotdl_download_sync, JOBS,
+)
+from m3u8_downloader import (
+    parse_m3u8, download_m3u8_sync, enqueue_m3u8_download, get_m3u8_job,
+    cancel_m3u8_job, list_m3u8_jobs, aria2_add_uri, aria2_tell_status,
+    aria2_remove, M3U8Job,
+)
+from downloader import (
+    cleanup_stale_downloads, download_audio, embed_metadata, enqueue_download,
+    extract_info, extract_lyrics, get_job, cancel_job, list_jobs, search,
+    spotdl_download_sync, JOBS,
+)
 from models import (
     DownloadResponse, ErrorResponse, HealthResponse, JobListResponse,
     JobActionResponse, LyricsResponse, LyricsSearchRequest, MetadataResponse,
     MetadataRequest, SearchResponse, SourcesResponse, TrackInfoResponse,
     DownloadJobItem,
+    M3U8ParseResponse, M3U8DownloadResponse, M3U8JobItem,
+    Aria2AddResponse, Aria2StatusResponse,
 )
 
 START_TIME = time.time()
@@ -66,7 +101,7 @@ async def lifespan(app: FastAPI):
 app = FastAPI(
     title="Videl-Api",
     description="Multi-source music REST API for music bots and more.",
-    version="2.1.0",
+    version="2.2.0",
     lifespan=lifespan,
 )
 
@@ -619,3 +654,253 @@ async def delete_key(key: str, owner_id: int = 0, _: dict = Depends(get_auth)):
     if not ok:
         raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="API key not found")
     return {"revoked": True, "key": key}
+
+
+# ---------------------------------------------------------------------------
+# M3U8 / HLS Parse
+# ---------------------------------------------------------------------------
+
+@app.post("/v1/m3u8/parse", response_model=M3U8ParseResponse, tags=["m3u8"])
+async def m3u8_parse(payload: M3U8ParseRequest, _: dict = Depends(get_auth)):
+    try:
+        info = await parse_m3u8(
+            payload.url,
+            headers=payload.headers,
+            cookies=payload.cookies,
+            proxy=payload.proxy,
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"M3U8 parse failed: {exc}",
+        )
+    return M3U8ParseResponse(**info)
+
+
+# ---------------------------------------------------------------------------
+# M3U8 / HLS Download (direct)
+# ---------------------------------------------------------------------------
+
+@app.post("/v1/m3u8/download", response_model=M3U8DownloadResponse, tags=["m3u8"])
+async def m3u8_download(payload: M3U8DownloadRequest, _: dict = Depends(get_auth)):
+    folder = f"{int(time.time()*1000)}"
+    output_dir = settings.download_dir / folder
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    try:
+        result = await download_m3u8_sync(
+            payload.url,
+            output_dir=output_dir,
+            headers=payload.headers,
+            cookies=payload.cookies,
+            proxy=payload.proxy,
+            max_threads=payload.max_threads,
+            use_aria2c=payload.use_aria2c,
+            decrypt=payload.decrypt,
+            merge_method=payload.merge_method,
+            save_name=payload.save_name,
+            custom_range=payload.custom_range,
+            audio_only=payload.audio_only,
+        )
+    except Exception as exc:
+        import shutil
+        shutil.rmtree(output_dir, ignore_errors=True)
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"M3U8 download failed: {exc}",
+        )
+    return M3U8DownloadResponse(**result)
+
+
+# ---------------------------------------------------------------------------
+# M3U8 Download Queue (background jobs)
+# ---------------------------------------------------------------------------
+
+@app.post("/v1/m3u8/download/queue", response_model=M3U8JobItem, tags=["m3u8"])
+async def m3u8_queue(payload: M3U8DownloadRequest, _: dict = Depends(get_auth)):
+    job = M3U8Job(job_id="", url=payload.url)
+    # Override job fields from payload
+    job_id = uuid.uuid4().hex
+    job.job_id = job_id
+    async with _M3U8_LOCK:
+        M3U8_JOBS[job_id] = job
+        M3U8_QUEUE.append(job_id)
+    asyncio.create_task(_process_m3u8_queue_with_opts(
+        job_id, payload.url,
+        headers=payload.headers,
+        cookies=payload.cookies,
+        proxy=payload.proxy,
+        max_threads=payload.max_threads,
+        use_aria2c=payload.use_aria2c,
+        decrypt=payload.decrypt,
+        merge_method=payload.merge_method,
+        save_name=payload.save_name,
+        custom_range=payload.custom_range,
+        audio_only=payload.audio_only,
+    ))
+    return M3U8JobItem(**job.to_dict())
+
+
+async def _process_m3u8_queue_with_opts(
+    job_id: str,
+    url: str,
+    *,
+    headers: Optional[dict[str, str]] = None,
+    cookies: Optional[str] = None,
+    proxy: Optional[str] = None,
+    max_threads: int = 16,
+    use_aria2c: bool = False,
+    decrypt: bool = True,
+    merge_method: str = "binary",
+    save_name: Optional[str] = None,
+    custom_range: Optional[str] = None,
+    audio_only: bool = False,
+):
+    job = M3U8_JOBS.get(job_id)
+    if not job:
+        return
+    job.status = "downloading"
+    job.updated_at = datetime.now(timezone.utc).isoformat()
+
+    sem = _m3u8_download_semaphore()
+    async with sem:
+        if job.cancelled:
+            job.status = "cancelled"
+            job.updated_at = datetime.now(timezone.utc).isoformat()
+            return
+        try:
+            out_dir = settings.download_dir / job_id
+            result = await download_m3u8_sync(
+                url,
+                output_dir=out_dir,
+                job=job,
+                headers=headers,
+                cookies=cookies,
+                proxy=proxy,
+                max_threads=max_threads,
+                decrypt=decrypt,
+                merge_method=merge_method,
+                save_name=save_name,
+                custom_range=custom_range,
+                audio_only=audio_only,
+            )
+            job.file_path = result["file_path"]
+            job.status = "completed"
+            job.progress = 100.0
+            job.updated_at = datetime.now(timezone.utc).isoformat()
+        except Exception as exc:
+            job.status = "failed"
+            job.error = str(exc)
+            job.updated_at = datetime.now(timezone.utc).isoformat()
+
+
+@app.get("/v1/m3u8/download/queue", response_model=JobListResponse, tags=["m3u8"])
+async def m3u8_list_jobs(_: dict = Depends(get_auth)):
+    jobs = await list_m3u8_jobs()
+    return JobListResponse(jobs=[M3U8JobItem(**j) for j in jobs])
+
+
+@app.get("/v1/m3u8/download/status/{job_id}", response_model=M3U8JobItem, tags=["m3u8"])
+async def m3u8_job_status(job_id: str, _: dict = Depends(get_auth)):
+    job = await get_m3u8_job(job_id)
+    if not job:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found")
+    return M3U8JobItem(**job)
+
+
+@app.post("/v1/m3u8/download/cancel/{job_id}", response_model=JobActionResponse, tags=["m3u8"])
+async def m3u8_cancel_job(job_id: str, _: dict = Depends(get_auth)):
+    ok = await cancel_m3u8_job(job_id)
+    if not ok:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Job not found")
+    return JobActionResponse(job_id=job_id, action="cancel", success=True)
+
+
+# ---------------------------------------------------------------------------
+# aria2 RPC
+# ---------------------------------------------------------------------------
+
+@app.post("/v1/aria2/add", response_model=Aria2AddResponse, tags=["aria2"])
+async def aria2_add(payload: Aria2AddRequest, _: dict = Depends(get_auth)):
+    if not settings.aria2c_rpc_enabled:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="aria2c RPC is not enabled. Set ARIA2C_RPC_ENABLED=true",
+        )
+    try:
+        gid = await aria2_add_uri(
+            payload.uris,
+            dir=payload.dir,
+            out=payload.out,
+            max_connections=payload.max_connections,
+            split=payload.split,
+            proxy=payload.proxy,
+            header=payload.header,
+            rpc_url=settings.aria2c_rpc_url,
+            rpc_secret=settings.aria2c_rpc_secret,
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"aria2 add failed: {exc}",
+        )
+    return Aria2AddResponse(gid=gid)
+
+
+@app.get("/v1/aria2/status/{gid}", response_model=Aria2StatusResponse, tags=["aria2"])
+async def aria2_status(gid: str, _: dict = Depends(get_auth)):
+    if not settings.aria2c_rpc_enabled:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="aria2c RPC is not enabled. Set ARIA2C_RPC_ENABLED=true",
+        )
+    try:
+        info = await aria2_tell_status(
+            gid,
+            rpc_url=settings.aria2c_rpc_url,
+            rpc_secret=settings.aria2c_rpc_secret,
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"aria2 status failed: {exc}",
+        )
+    total = info.get("totalLength", "0")
+    completed = info.get("completedLength", "0")
+    try:
+        progress = (int(completed) / int(total) * 100) if int(total) > 0 else 0.0
+    except Exception:
+        progress = 0.0
+    return Aria2StatusResponse(
+        gid=gid,
+        status=info.get("status", "unknown"),
+        total_length=total,
+        completed_length=completed,
+        download_speed=info.get("downloadSpeed"),
+        progress=round(progress, 2),
+        dir=info.get("dir"),
+        files=info.get("files", []),
+    )
+
+
+@app.post("/v1/aria2/remove/{gid}", tags=["aria2"])
+async def aria2_remove_download(gid: str, _: dict = Depends(get_auth)):
+    if not settings.aria2c_rpc_enabled:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="aria2c RPC is not enabled. Set ARIA2C_RPC_ENABLED=true",
+        )
+    try:
+        ok = await aria2_remove(
+            gid,
+            rpc_url=settings.aria2c_rpc_url,
+            rpc_secret=settings.aria2c_rpc_secret,
+        )
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"aria2 remove failed: {exc}",
+        )
+    if not ok:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND, detail="Download not found")
+    return {"removed": True, "gid": gid}

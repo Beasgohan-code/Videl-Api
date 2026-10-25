@@ -9,3 +9,6 @@ pydantic>=2.0,<3.0
 spotdl>=4.5,<5.0
 syncedlyrics>=1.0,<2.0
 mutagen>=1.48,<2.0
+m3u8>=6.0,<7.0
+cryptography>=42.0,<51.0
+requests>=2.31,<3.0

@@ -85,6 +85,19 @@ class Settings:
     spotify_client_id: str | None = field(default_factory=lambda: _env("SPOTIFY_CLIENT_ID", "") or None)
     spotify_client_secret: str | None = field(default_factory=lambda: _env("SPOTIFY_CLIENT_SECRET", "") or None)
 
+    # ---- M3U8 / HLS / DASH downloader (globocom/m3u8 + N_m3u8DL) ----
+    m3u8_enabled: bool = field(default_factory=lambda: _env_bool("M3U8_ENABLED", True))
+    m3u8_max_threads: int = field(default_factory=lambda: _env_int("M3U8_MAX_THREADS", 16))
+    m3u8_merge_method: str = field(default_factory=lambda: _env("M3U8_MERGE_METHOD", "binary"))
+    m3u8_decrypt: bool = field(default_factory=lambda: _env_bool("M3U8_DECRYPT", True))
+    m3u8_default_headers: dict = field(default_factory=lambda: _env_json("M3U8_DEFAULT_HEADERS", {}))
+    m3u8_timeout: int = field(default_factory=lambda: _env_int("M3U8_TIMEOUT", 30))
+
+    # aria2c JSON-RPC (aria2/aria2)
+    aria2c_rpc_url: str = field(default_factory=lambda: _env("ARIA2C_RPC_URL", "http://localhost:6800/jsonrpc"))
+    aria2c_rpc_secret: str = field(default_factory=lambda: _env("ARIA2C_RPC_SECRET", ""))
+    aria2c_rpc_enabled: bool = field(default_factory=lambda: _env_bool("ARIA2C_RPC_ENABLED", False))
+
     # ---- Metadata & lyrics ----
     metadata_embed: bool = field(default_factory=lambda: _env_bool("METADATA_EMBED", True))
     metadata_album_art: bool = field(default_factory=lambda: _env_bool("METADATA_ALBUM_ART", True))
@@ -233,6 +246,22 @@ MUSIC_SOURCES: dict[str, dict] = {
         "supports_playlist": False,
         "description": "Alternative YouTube frontend.",
     },
+    "m3u8": {
+        "name": "M3U8 / HLS",
+        "domains": [".m3u8", ".m3u8?"],
+        "search_prefix": None,
+        "supports_search": False,
+        "supports_playlist": True,
+        "description": "HLS streaming playlists (via globocom/m3u8 + N_m3u8DL).",
+    },
+    "dash": {
+        "name": "MPEG-DASH",
+        "domains": [".mpd"],
+        "search_prefix": None,
+        "supports_search": False,
+        "supports_playlist": True,
+        "description": "DASH streaming manifests (via N_m3u8DL-RE).",
+    },
 }
 
 GENERIC_SOURCE_ID = "generic"
@@ -267,3 +296,8 @@ def search_prefix_for(source_id: str) -> str | None:
     if not info:
         return None
     return info.get("search_prefix")
+
+
+# --- Branding (Eldian credits changed to Videl) ---------------------------
+API_BRAND = "Videl-Api"
+API_BRAND_URL = "https://github.com/Beasgohan-code/Videl-Api"

@@ -13,3 +13,4 @@ api_keys.json
 .coverage
 htmlcov/
 .DS_Store
+eldian/.git/

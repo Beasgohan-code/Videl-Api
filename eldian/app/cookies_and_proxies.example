@@ -1,0 +1,9 @@
+# Example cookie and proxy configuration for local testing.
+# This file is used as a default placeholder when no explicit cookies file is set.
+# Replace its contents with a real Netscape-format cookies file if needed.
+# Example:
+# .google.com	TRUE	/	FALSE	0	CONSENT	YES+
+# .youtube.com	TRUE	/	FALSE	0	GPS	1
+
+# Proxy can also be supplied via the YOUTUBE_PROXY or YT_DLP_PROXY environment variable.
+# Example: http://127.0.0.1:8080
