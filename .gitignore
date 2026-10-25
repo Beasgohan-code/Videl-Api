@@ -24,3 +24,4 @@ analytics.json
 htmlcov/
 .DS_Store
 eldian/.git/
+node_modules/
