@@ -15,7 +15,6 @@ venv.bak/
 Dockerfile
 docker-compose.yml
 .env
-.env.example
 logs/
 downloads/
 *.db
