@@ -22,7 +22,8 @@ WORKDIR /build
 
 # Install Python dependencies first (better layer caching)
 COPY requirements.txt .
-RUN pip install --user --no-cache-dir -r requirements.txt
+RUN pip install --user --no-cache-dir -r requirements.txt && \
+    pip install --user --no-cache-dir --no-deps "spotdl>=4.5,<5.0"
 
 # ------------------------------------------------------------
 # Stage 2: Runtime
