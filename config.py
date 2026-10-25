@@ -6,6 +6,7 @@ import json
 import os
 from dataclasses import dataclass, field
 from pathlib import Path
+from shutil import which
 
 APP_DIR = Path(__file__).resolve().parent
 
@@ -42,24 +43,24 @@ def _env_json(name: str, default=None):
 
 @dataclass
 class Settings:
-    # Server
+    # ---- Server ----
     api_host: str = field(default_factory=lambda: _env("API_HOST", "0.0.0.0"))
     api_port: int = field(default_factory=lambda: _env_int("API_PORT", 8000))
     api_base_url: str = field(default_factory=lambda: _env("API_BASE_URL", "http://localhost:8000"))
 
-    # Auth
+    # ---- Auth ----
     api_keys_enabled: bool = field(default_factory=lambda: _env_bool("API_KEYS", True))
     admin_keys: list[str] = field(default_factory=lambda: _env_csv("ADMIN_KEYS"))
 
-    # MongoDB (optional)
+    # ---- MongoDB (optional) ----
     mongodb_uri: str = field(default_factory=lambda: _env("MONGODB_URI", "mongodb://localhost:27017"))
     mongodb_db: str = field(default_factory=lambda: _env("MONGODB_DB", "videl_music"))
 
-    # Rate limiting
+    # ---- Rate limiting ----
     rate_limit_enabled: bool = field(default_factory=lambda: _env_bool("RATE_LIMIT_ENABLED", True))
     rate_limit_default: int = field(default_factory=lambda: _env_int("RATE_LIMIT_DEFAULT", 60))
 
-    # yt-dlp downloader
+    # ---- yt-dlp downloader ----
     yt_dlp_format: str = field(default_factory=lambda: _env("YT_DLP_FORMAT", "bestaudio/best"))
     yt_dlp_socket_timeout: int = field(default_factory=lambda: _env_int("YT_DLP_SOCKET_TIMEOUT", 20))
     yt_dlp_retries: int = field(default_factory=lambda: _env_int("YT_DLP_RETRIES", 3))
@@ -74,10 +75,31 @@ class Settings:
     yt_dlp_cookies_file: str | None = field(default_factory=lambda: _env("YOUTUBE_COOKIES_FILE", "") or None)
     yt_dlp_cookies_files: dict = field(default_factory=lambda: _env_json("YOUTUBE_COOKIES_FILES", {}) or {})
 
-    # CORS
+    # ---- External downloaders (aria2c, ffmpeg, spotdl) ----
+    aria2c_path: str = field(default_factory=lambda: _env("ARIA2C_PATH", which("aria2c") or ""))
+    aria2c_args: str = field(default_factory=lambda: _env("ARIA2C_ARGS", "-x 16 -s 16 -k 1M"))
+    aria2c_enabled: bool = field(default_factory=lambda: _env_bool("ARIA2C_ENABLED", True))
+    ffmpeg_path: str = field(default_factory=lambda: _env("FFMPEG_PATH", which("ffmpeg") or ""))
+    spotdl_path: str = field(default_factory=lambda: _env("SPOTDL_PATH", "spotdl"))
+    spotdl_enabled: bool = field(default_factory=lambda: _env_bool("SPOTDL_ENABLED", True))
+    spotify_client_id: str | None = field(default_factory=lambda: _env("SPOTIFY_CLIENT_ID", "") or None)
+    spotify_client_secret: str | None = field(default_factory=lambda: _env("SPOTIFY_CLIENT_SECRET", "") or None)
+
+    # ---- Metadata & lyrics ----
+    metadata_embed: bool = field(default_factory=lambda: _env_bool("METADATA_EMBED", True))
+    metadata_album_art: bool = field(default_factory=lambda: _env_bool("METADATA_ALBUM_ART", True))
+    lyrics_providers: list[str] = field(default_factory=lambda: _env_csv("LYRICS_PROVIDERS"))
+    lyrics_default_provider: str = field(default_factory=lambda: _env("LYRICS_DEFAULT_PROVIDER", "synced"))
+    sponsorblock: bool = field(default_factory=lambda: _env_bool("SPONSORBLOCK", True))
+
+    # ---- Download queue / concurrency ----
+    download_max_concurrent: int = field(default_factory=lambda: _env_int("DOWNLOAD_MAX_CONCURRENT", 3))
+    download_chunk_connections: int = field(default_factory=lambda: _env_int("DOWNLOAD_CHUNK_CONNECTIONS", 16))
+
+    # ---- CORS ----
     cors_origins: list[str] = field(default_factory=lambda: _env_csv("CORS_ORIGINS"))
 
-    # Search defaults
+    # ---- Search defaults ----
     search_default_limit: int = field(default_factory=lambda: _env_int("SEARCH_DEFAULT_LIMIT", 20))
     search_max_limit: int = field(default_factory=lambda: _env_int("SEARCH_MAX_LIMIT", 100))
 
@@ -87,9 +109,8 @@ settings = Settings()
 
 # --- Music source registry --------------------------------------------------
 # Each source: id, name, domains, and the yt-dlp search prefix (if any).
-# This is a curated list of the most useful music/video sources yt-dlp can
-# handle natively. yt-dlp itself supports 1000+ sites; anything not listed
-# here is still reachable via the generic extractor.
+# yt-dlp supports 1000+ sites; anything not listed here is reachable via the
+# generic extractor.
 
 MUSIC_SOURCES: dict[str, dict] = {
     "youtube": {
@@ -99,6 +120,14 @@ MUSIC_SOURCES: dict[str, dict] = {
         "supports_search": True,
         "supports_playlist": True,
         "description": "Videos, music, playlists, shorts.",
+    },
+    "youtube_music": {
+        "name": "YouTube Music",
+        "domains": ["music.youtube.com"],
+        "search_prefix": "ytmsearch",
+        "supports_search": True,
+        "supports_playlist": True,
+        "description": "YouTube Music tracks, albums, playlists.",
     },
     "soundcloud": {
         "name": "SoundCloud",
@@ -122,7 +151,7 @@ MUSIC_SOURCES: dict[str, dict] = {
         "search_prefix": None,
         "supports_search": False,
         "supports_playlist": True,
-        "description": "Tracks, albums, playlists (DRM-protected tracks may fail).",
+        "description": "Tracks, albums, playlists (via spotdl metadata + yt-dlp audio).",
     },
     "apple_music": {
         "name": "Apple Music",
@@ -188,9 +217,24 @@ MUSIC_SOURCES: dict[str, dict] = {
         "supports_playlist": False,
         "description": "Videos and audio posts.",
     },
+    "piped": {
+        "name": "Piped",
+        "domains": ["piped.video", "piped.kavin.rocks"],
+        "search_prefix": None,
+        "supports_search": False,
+        "supports_playlist": False,
+        "description": "Privacy-focused YouTube frontend.",
+    },
+    "invidious": {
+        "name": "Invidious",
+        "domains": ["invidious.io", "invidious.nerdvpn.de"],
+        "search_prefix": None,
+        "supports_search": False,
+        "supports_playlist": False,
+        "description": "Alternative YouTube frontend.",
+    },
 }
 
-# Any source not in MUSIC_SOURCES but supported by yt-dlp's generic extractor.
 GENERIC_SOURCE_ID = "generic"
 
 

@@ -1,129 +1,147 @@
 # Videl-Api
 
-Powerful multi-source music REST API for music bots and more — built to exceed [Eldian-Network/eldian-music-api](https://github.com/Eldian-Network/eldian-music-api) and [MakcRe/KuGouMusicApi](https://github.com/MakcRe/KuGouMusicApi).
+Powerful multi-source music REST API for music bots and more — built to exceed
+[Eldian-Network/eldian-music-api](https://github.com/Eldian-Network/eldian-music-api)
+and [MakcRe/KuGouMusicApi](https://github.com/MakcRe/KuGouMusicApi).
 
-## Features
+Integrates the best ideas from:
+- **yt-dlp** — 1000+ sites, search, playlists
+- **aria2c** — multipart parallel downloads (faster)
+- **spotDL/spotify-downloader** — Spotify metadata, lyrics, album art
+- **Tyrrrz/YoutubeDownloader** — metadata tagging, sponsorblock, cookies
+- **bezzad/Downloader** — pause/resume, queue, concurrency control
 
-| Feature | Eldian | KuGou | Videl-Api |
-|---------|--------|-------|-----------|
-| Audio download | YouTube only | KuGou only | **YouTube, SoundCloud, Bandcamp, Spotify, Deezer, Apple Music, Vimeo, Dailymotion, TikTok, Facebook, Instagram, X/Twitter + 1000+ yt-dlp sites** |
-| Search | ❌ | ✅ | ✅ (multi-source) |
-| Track info | ❌ | ✅ | ✅ (duration, artist, album, genres, lyrics, thumbnails) |
-| Playlists/Albums | ❌ | ✅ | ✅ |
-| Lyrics | ❌ | ✅ | ✅ |
-| Direct stream URL | ❌ | ✅ | ✅ (`/v1/stream`) |
-| API key auth | ✅ (MongoDB) | ❌ | ✅ (MongoDB + JSON fallback) |
-| Admin/master keys | ❌ | ❌ | ✅ |
-| Rate limiting | ❌ | ❌ | ✅ |
-| CORS | ❌ | ❌ | ✅ |
-| Auto temp-file cleanup | ✅ | ✅ | ✅ |
-| Stale download pruning | ✅ | ❌ | ✅ |
+## Capability Comparison
+
+| Feature | Eldian | KuGou | spotDL | Videl-Api |
+|---------|--------|-------|--------|-----------|
+| Sources | YouTube only | KuGou only | YouTube+Spotify meta | **15+ sources, 1000+ sites** |
+| Search | ❌ | ✅ | ✅ | ✅ (multi-source) |
+| Track info | ❌ | ✅ | ✅ | ✅ (full metadata) |
+| Playlists/Albums | ❌ | ✅ | ✅ | ✅ |
+| Lyrics | ❌ | ✅ | ✅ | ✅ (5 providers) |
+| Spotify metadata | ❌ | ❌ | ✅ | ✅ (spotdl integration) |
+| Album art embedding | ❌ | ❌ | ✅ | ✅ |
+| SponsorBlock | ❌ | ❌ | ❌ | ✅ |
+| aria2c multipart | ❌ | ❌ | ❌ | ✅ |
+| Download queue + pause/resume | ❌ | ❌ | ❌ | ✅ |
+| API key auth | ✅ (MongoDB) | ❌ | ❌ | ✅ (MongoDB + JSON) |
+| Rate limiting | ❌ | ❌ | ❌ | ✅ |
+| CORS | ❌ | ❌ | ❌ | ✅ |
+| Auto temp cleanup | ✅ | ✅ | ✅ | ✅ |
 
 ## Quick Start
 
 ```bash
-# Clone
 git clone https://github.com/Beasgohan-code/Videl-Api.git
 cd Videl-Api
-
-# Create virtualenv
 python3 -m venv .venv
 source .venv/bin/activate
-
-# Install dependencies
 pip install -r requirements.txt
-
-# Configure
 cp .env.example .env
-# (edit .env if needed)
-
-# Run
+# edit .env if needed
 python -m uvicorn main:app --host 0.0.0.0 --port 8000
 ```
 
-API docs are available at `http://localhost:8000/docs`.
+API docs: `http://localhost:8000/docs`
 
 ## Endpoints
 
-### Meta
+| Method | Path | Auth | Description |
+|--------|------|------|-------------|
+| GET | `/` | No | API info |
+| GET | `/health` | No | Health + enabled features |
+| GET | `/v1/sources` | Yes | List supported sources |
+| GET | `/v1/search` | Yes | Search music |
+| POST | `/v1/search` | Yes | Search (JSON body) |
+| GET | `/v1/info` | Yes | Track/playlist/album info |
+| POST | `/v1/info` | Yes | Info (JSON body) |
+| GET | `/v1/lyrics` | Yes | Lyrics for a track URL |
+| POST | `/v1/lyrics` | Yes | Lyrics (JSON body) |
+| POST | `/v1/lyrics/search` | Yes | Lyrics by title + artist |
+| GET | `/v1/metadata` | Yes | Spotify metadata enrichment |
+| POST | `/v1/metadata` | Yes | Metadata (JSON body) |
+| GET | `/v1/download` | Yes | Download audio file |
+| POST | `/v1/download` | Yes | Download (JSON body) |
+| POST | `/v1/download/queue` | Yes | Enqueue background download job |
+| GET | `/v1/download/queue` | Yes | List all jobs |
+| GET | `/v1/download/status/{id}` | Yes | Job status |
+| POST | `/v1/download/cancel/{id}` | Yes | Cancel a job |
+| GET | `/v1/file/{folder}/{file}` | Yes | Serve file (auto-cleanup) |
+| GET | `/v1/stream` | Yes | Direct stream URL |
+| POST | `/v1/keys` | No | Create API key (bootstrap) |
+| GET | `/v1/keys` | Yes | List keys |
+| DELETE | `/v1/keys/{key}` | Yes | Revoke key |
 
-| Method | Path | Description | Auth |
-|--------|------|-------------|------|
-| GET | `/` | API info | No |
-| GET | `/health` | Health check | No |
-| GET | `/v1/sources` | List supported music sources | Yes |
+### Example: Download with Spotify metadata + lyrics
 
-### Search
+```bash
+curl -X POST "http://localhost:8000/v1/download" \
+  -H "X-API-Key: YOUR_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"url":"https://open.spotify.com/track/...","fetch_lyrics":true,"embed_metadata":true,"use_aria2c":true}'
+```
 
-| Method | Path | Description | Auth |
-|--------|------|-------------|------|
-| GET | `/v1/search?q=...&source=...&limit=...` | Search music | Yes |
-| POST | `/v1/search` | Search music (JSON body) | Yes |
+### Example: Search SoundCloud
 
-### Track / Info
+```bash
+curl -H "X-API-Key: YOUR_KEY" \
+  "http://localhost:8000/v1/search?q=lofi%20hip%20hop&source=soundcloud&limit=10"
+```
 
-| Method | Path | Description | Auth |
-|--------|------|-------------|------|
-| GET | `/v1/info?url=...&source=...` | Extract track/album/playlist info | Yes |
-| POST | `/v1/info` | Extract info (JSON body) | Yes |
+### Example: Lyrics by title+artist
 
-### Lyrics
-
-| Method | Path | Description | Auth |
-|--------|------|-------------|------|
-| GET | `/v1/lyrics?url=...` | Get lyrics for a track | Yes |
-| POST | `/v1/lyrics` | Get lyrics (JSON body) | Yes |
-
-### Download / Stream
-
-| Method | Path | Description | Auth |
-|--------|------|-------------|------|
-| GET | `/v1/download?url=...&format=...` | Download audio file | Yes |
-| POST | `/v1/download` | Download audio (JSON body) | Yes |
-| GET | `/v1/file/{folder}/{filename}` | Serve downloaded file (auto-cleanup) | Yes |
-| GET | `/v1/stream?url=...` | Resolve direct stream URL | Yes |
-
-### API Keys
-
-| Method | Path | Description | Auth |
-|--------|------|-------------|------|
-| POST | `/v1/keys?owner_id=...` | Create a new API key | No (open bootstrap) |
-| GET | `/v1/keys?owner_id=...` | List your API keys | Yes |
-| DELETE | `/v1/keys/{key}?owner_id=...` | Revoke an API key | Yes |
+```bash
+curl -X POST "http://localhost:8000/v1/lyrics/search" \
+  -H "X-API-Key: YOUR_KEY" \
+  -H "Content-Type: application/json" \
+  -d '{"title":"Blinding Lights","artist":"The Weeknd","provider":"synced"}'
+```
 
 ## Authentication
 
-By default API key auth is enabled (`API_KEYS=true` in `.env`). All music endpoints require an `X-API-Key` header.
+`X-API-Key` header required on all music endpoints. Bootstrap your first key:
 
-- Create a key: `POST /v1/keys?owner_id=123` (no auth required — bootstrap)
-- Use it: `curl -H "X-API-Key: <key>" http://localhost:8000/v1/sources`
-- Admin keys: set `ADMIN_KEYS=key1,key2` in `.env` for master keys that bypass all checks
-- Disable auth: set `API_KEYS=false` in `.env`
+```
+POST /v1/keys?owner_id=123   # no auth required
+```
 
-MongoDB is used for key storage when `MONGODB_URI` is reachable. Falls back to a local `api_keys.json` file automatically.
+Set `ADMIN_KEYS` in `.env` for master keys. Disable auth with `API_KEYS=false`.
+MongoDB is used when reachable; falls back to `api_keys.json` automatically.
+
+## External Tools (optional, auto-detected)
+
+| Tool | Purpose | Install |
+|------|---------|---------|
+| aria2c | Multipart parallel downloads (faster) | `apt install aria2` |
+| ffmpeg | Audio conversion, post-processing | `apt install ffmpeg` |
+| spotdl | Spotify metadata + audio matching | `pip install spotdl` |
+
+Set `ARIA2C_PATH`, `FFMPEG_PATH`, `SPOTDL_PATH` in `.env` if not in PATH.
 
 ## Environment Variables
 
-See `.env.example` for the full list. Key settings:
+See `.env.example` for the full list. Highlights:
 
-- `API_HOST`, `API_PORT` — bind address
-- `API_KEYS` — enable/disable auth (default: true)
-- `ADMIN_KEYS` — comma-separated master admin keys
-- `MONGODB_URI` — MongoDB connection string (optional, falls back to JSON file)
-- `RATE_LIMIT_ENABLED`, `RATE_LIMIT_DEFAULT` — per-key rate limiting
-- `YT_DLP_FORMAT` — audio format selector (default: `bestaudio/best`)
-- `YOUTUBE_PROXY` / `YOUTUBE_COOKIES` — proxy and cookies for restricted content
-- `CORS_ORIGINS` — CORS allowed origins (default: `*`)
+- `ARIA2C_ENABLED=true` — use aria2c for multipart downloads
+- `ARIA2C_ARGS=-x 16 -s 16` — 16 connections per download
+- `SPOTDL_ENABLED=true` — enable spotdl Spotify integration
+- `SPOTIFY_CLIENT_ID/SECRET` — Spotify API credentials
+- `LYRICS_PROVIDERS=synced,genius,musixmatch,azlyrics` — fallback order
+- `METADATA_EMBED=true` — embed ID3 tags + album art
+- `SPONSORBLOCK=true` — remove sponsored segments
+- `DOWNLOAD_MAX_CONCURRENT=3` — max simultaneous download jobs
 
 ## Supported Sources
 
-YouTube, SoundCloud, Bandcamp, Spotify, Deezer, Apple Music, Vimeo, Dailymotion, TikTok, Facebook, Instagram, X/Twitter — plus any of the 1000+ sites yt-dlp supports natively.
+YouTube, YouTube Music, SoundCloud, Bandcamp, Spotify, Apple Music, Deezer,
+Vimeo, Dailymotion, TikTok, Facebook, Instagram, X/Twitter, Piped, Invidious —
+plus any of the 1000+ sites yt-dlp supports natively.
 
 ## Deployment
 
-Run behind a reverse proxy (Nginx, Caddy, Traefik) with TLS. Set `API_KEYS=true`, use strong `ADMIN_KEYS`, and consider enabling rate limiting.
-
-Example systemd service:
+Run behind a reverse proxy (Nginx/Caddy/Traefik) with TLS. Use strong
+`ADMIN_KEYS` and enable rate limiting.
 
 ```ini
 [Unit]

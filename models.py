@@ -23,6 +23,7 @@ class HealthResponse(BaseModel):
     version: str = "2.0.0"
     sources: int
     uptime_seconds: float
+    features: dict[str, bool] = {}
 
 
 class SourceItem(BaseModel):
@@ -55,7 +56,7 @@ class TrackMini(BaseModel):
     source: str
     source_name: str
     uploader: Optional[str] = None
-    duration: Optional[int] = None  # seconds
+    duration: Optional[int] = None
     view_count: Optional[int] = None
     thumbnail: Optional[str] = None
     url: Optional[str] = None
@@ -96,7 +97,7 @@ class TrackInfoResponse(BaseModel):
     url: Optional[str] = None
     ext: Optional[str] = None
     format_id: Optional[str] = None
-    abr: Optional[float] = None  # audio bitrate
+    abr: Optional[float] = None
     filesize: Optional[int] = None
     is_playlist: bool = False
     is_album: bool = False
@@ -105,8 +106,8 @@ class TrackInfoResponse(BaseModel):
     artist: Optional[str] = None
     genres: list[str] = []
     release_year: Optional[int] = None
-    webpages: list[str] = []
-    entries: list[TrackMini] = []  # playlist/album tracks
+    entries: list[TrackMini] = []
+    lyrics_available: bool = False
 
 
 # ---------------------------------------------------------------------------
@@ -117,7 +118,10 @@ class DownloadRequest(BaseModel):
     url: str = Field(..., min_length=1, description="Media URL or video/track id")
     source: Optional[str] = Field(default=None, description="Force a source id")
     format: str = Field(default="bestaudio/best", description="yt-dlp format selector")
-    quality: Optional[str] = Field(default=None, description="best/worst or audio bitrate hint")
+    quality: Optional[str] = Field(default=None, description="Audio bitrate hint")
+    use_aria2c: bool = Field(default=True, description="Use aria2c multipart downloader if available")
+    embed_metadata: bool = Field(default=True, description="Embed ID3/album-art metadata")
+    fetch_lyrics: bool = Field(default=False, description="Also fetch and embed lyrics")
 
 
 class DownloadResponse(BaseModel):
@@ -130,6 +134,30 @@ class DownloadResponse(BaseModel):
     filesize: Optional[int] = None
     duration: Optional[int] = None
     ext: Optional[str] = None
+    lyrics: Optional[str] = None
+
+
+# Download queue / job
+class DownloadJobItem(BaseModel):
+    job_id: str
+    url: str
+    source: Optional[str] = None
+    status: str
+    progress: float
+    file_path: Optional[str] = None
+    error: Optional[str] = None
+    created_at: str
+    updated_at: str
+
+
+class JobListResponse(BaseModel):
+    jobs: list[DownloadJobItem]
+
+
+class JobActionResponse(BaseModel):
+    job_id: str
+    action: str
+    success: bool
 
 
 # ---------------------------------------------------------------------------
@@ -138,6 +166,7 @@ class DownloadResponse(BaseModel):
 
 class LyricsRequest(BaseModel):
     url: str = Field(..., min_length=1, description="Media URL or video/track id")
+    provider: Optional[str] = Field(default=None, description="Lyrics provider: synced, genius, musixmatch, azlyrics")
 
 
 class LyricsResponse(BaseModel):
@@ -147,6 +176,44 @@ class LyricsResponse(BaseModel):
     source_name: Optional[str] = None
     lyrics: Optional[str] = None
     lyrics_provider: Optional[str] = None
+
+
+class LyricsSearchRequest(BaseModel):
+    title: str = Field(..., min_length=1, description="Song title")
+    artist: Optional[str] = Field(default=None, description="Artist name")
+    provider: Optional[str] = Field(default=None, description="Lyrics provider")
+
+
+# ---------------------------------------------------------------------------
+# Metadata (Spotify enrichment)
+# ---------------------------------------------------------------------------
+
+class MetadataRequest(BaseModel):
+    url: Optional[str] = Field(default=None, description="Spotify track/album/playlist URL")
+    query: Optional[str] = Field(default=None, description="Search query (track name)")
+
+
+class MetadataTrack(BaseModel):
+    id: str
+    name: str
+    artists: list[str] = []
+    album: Optional[str] = None
+    album_art: Optional[str] = None
+    duration_ms: Optional[int] = None
+    release_year: Optional[int] = None
+    genres: list[str] = []
+    isrc: Optional[str] = None
+    popularity: Optional[int] = None
+    track_number: Optional[int] = None
+    explicit: Optional[bool] = None
+    preview_url: Optional[str] = None
+    spotify_url: Optional[str] = None
+
+
+class MetadataResponse(BaseModel):
+    type: str  # track | album | playlist
+    tracks: list[MetadataTrack]
+    total: int
 
 
 # ---------------------------------------------------------------------------
@@ -164,6 +231,3 @@ class ApiKeyRecord(BaseModel):
     active: bool = True
     created_at: Optional[datetime] = None
     last_used_at: Optional[datetime] = None
-
-
-
