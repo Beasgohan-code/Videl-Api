@@ -165,7 +165,7 @@ export function statusBadge(status: string): HTMLElement {
 
 // ---- Progress bar ----
 
-export function progressBar(progress: number): HTMLElement {
+export function progressBar(progress: number, fillClass?: string): HTMLElement {
   return el("div", {
     className: "progress-container",
     style: {
@@ -178,6 +178,7 @@ export function progressBar(progress: number): HTMLElement {
     },
     children: [
       el("div", {
+        className: fillClass || "",
         style: {
           width: `${Math.min(100, Math.max(0, progress))}%`,
           height: "100%",
@@ -436,32 +437,48 @@ export async function renderDashboard(container: HTMLElement, user: User): Promi
   const s = store;
 
   // Header
+  const wsStatus = el("div", {
+    className: "ws-status disconnected",
+    id: "ws-status",
+    children: [
+      el("div", { className: "ws-dot" }),
+      el("span", { textContent: "Realtime: Disconnected" }),
+    ],
+  });
+
   const header = el("header", {
     className: "dashboard-header",
     style: {
       display: "flex",
       alignItems: "center",
+      justifyContent: "space-between",
       gap: "16px",
       marginBottom: "32px",
     },
     children: [
-      el("img", {
-        src: user.photo_url || "https://via.placeholder.com/48",
-        alt: "avatar",
-        style: { width: "48px", height: "48px", borderRadius: "50%" },
-      }),
       el("div", {
+        style: { display: "flex", alignItems: "center", gap: "16px", flex: 1 },
         children: [
-          el("h1", {
-            textContent: `Welcome, ${user.first_name}`,
-            style: { margin: 0, fontSize: "1.5rem", color: "#1a1a2e" },
+          el("img", {
+            src: user.photo_url || "https://via.placeholder.com/48",
+            alt: "avatar",
+            style: { width: "48px", height: "48px", borderRadius: "50%" },
           }),
-          el("p", {
-            textContent: user.username ? `@${user.username}` : "Telegram User",
-            style: { margin: 0, color: "#666", fontSize: "0.9rem" },
+          el("div", {
+            children: [
+              el("h1", {
+                textContent: `Welcome, ${user.first_name}`,
+                style: { margin: 0, fontSize: "1.5rem", color: "#1a1a2e" },
+              }),
+              el("p", {
+                textContent: user.username ? `@${user.username}` : "Telegram User",
+                style: { margin: 0, color: "#666", fontSize: "0.9rem" },
+              }),
+            ],
           }),
         ],
       }),
+      wsStatus,
     ],
   });
 
@@ -1318,9 +1335,37 @@ export async function renderDownloads(container: HTMLElement): Promise<void> {
 
   loadDownloads();
 
-  // Listen for WebSocket download updates
+  // Connect to WebSocket for real-time updates
+  const userId = store.getState().user?.id || 1;
+  api.wsConnect(userId);
+  api.wsSubscribe("downloads");
+
+  // WebSocket connection status indicator
+  const wsStatusEl = document.getElementById("ws-status");
+  const updateWsStatus = (connected: boolean) => {
+    if (!wsStatusEl) return;
+    const dot = wsStatusEl.querySelector(".ws-dot");
+    const text = wsStatusEl.querySelector("span");
+    if (connected) {
+      wsStatusEl.className = "ws-status connected";
+      if (dot) {
+        dot.classList.remove("ws-dot");
+        dot.classList.add("ws-dot");
+      }
+      if (text) text.textContent = "Realtime: Connected";
+    } else {
+      wsStatusEl.className = "ws-status disconnected";
+      if (text) text.textContent = "Realtime: Disconnected";
+    }
+  };
+
+  api.on("ws:open", () => updateWsStatus(true));
+  api.on("ws:close", () => updateWsStatus(false));
+
+  // Listen for WebSocket download updates - update individual cards in real-time
   api.on("ws:download_started", (data: any) => {
-    // Handle via store updates
+    haptic("light");
+    loadDownloads();
   });
   api.on("ws:download_completed", (data: any) => {
     haptic("success");
@@ -1329,6 +1374,22 @@ export async function renderDownloads(container: HTMLElement): Promise<void> {
   api.on("ws:download_failed", (data: any) => {
     haptic("error");
     loadDownloads();
+  });
+  api.on("ws:download_progress", (data: any) => {
+    // Update individual card progress without full reload
+    const { job_id, progress } = data;
+    const card = document.querySelector(`[data-job-id="${job_id}"]`);
+    if (card) {
+      const progressBar = card.querySelector(".progress-bar-fill");
+      const progressText = card.querySelector(".progress-text");
+      if (progressBar) progressBar.style.width = `${progress}%`;
+      if (progressText) progressText.textContent = `${progress}%`;
+    }
+  });
+
+  // Cleanup WebSocket on page unload
+  window.addEventListener("beforeunload", () => {
+    api.wsDisconnect();
   });
 
   return { loadDownloads };
@@ -1355,6 +1416,7 @@ function renderDownloadCard(job: DownloadJob): HTMLElement {
 
   return el("div", {
     className: "download-card",
+    "data-job-id": job.job_id,
     style: {
       background: "#fff",
       padding: "16px",
@@ -1384,10 +1446,13 @@ function renderDownloadCard(job: DownloadJob): HTMLElement {
             style: { display: "flex", justifyContent: "space-between", fontSize: "0.75rem", color: "#666", marginBottom: "4px" },
             children: [
               el("span", { textContent: "Progress" }),
-              el("span", { textContent: progressText }),
+              el("span", {
+                className: "progress-text",
+                textContent: progressText,
+              }),
             ],
           }),
-          progressBar(job.progress),
+          progressBar(job.progress, "progress-bar-fill"),
         ],
       }),
       isFailed && job.error && el("div", {

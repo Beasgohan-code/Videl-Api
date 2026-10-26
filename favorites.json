@@ -55,5 +55,15 @@
       "test"
     ],
     "created_at": "2026-10-25T15:29:51.590342+00:00"
+  },
+  {
+    "id": "8xu2QR38eLI5GpaQkH_z9A",
+    "user_id": 1,
+    "title": "Test",
+    "url": "https://youtu.be/test",
+    "source": "youtube",
+    "thumbnail": null,
+    "tags": [],
+    "created_at": "2026-10-26T12:09:32.584856+00:00"
   }
 ]

@@ -1097,5 +1097,13 @@ async def start_bot_polling() -> None:
                 offset = upd["update_id"] + 1
                 asyncio.create_task(process_update(upd))
         except Exception as exc:
-            logger.error(f"Polling error: {exc}")
-            await asyncio.sleep(5)
+            msg = str(exc)
+            if "Conflict" in msg or "terminated by other getUpdates" in msg:
+                logger.warning(
+                    "Telegram polling conflict: another bot instance is running. "
+                    "Backing off 30s. Use webhook mode or disable polling.",
+                )
+                await asyncio.sleep(30)
+            else:
+                logger.error(f"Polling error: {exc}")
+                await asyncio.sleep(5)

@@ -63,7 +63,7 @@ from pydantic import BaseModel, Field
 from fastapi import Depends, FastAPI, HTTPException, status, WebSocket, WebSocketDisconnect
 from starlette.background import BackgroundTask
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, RedirectResponse
+from fastapi.responses import FileResponse, RedirectResponse, Response
 
 from auth import create_api_key, list_api_keys, revoke_api_key, validate_api_key, _load_json, _save_json, KEYS_FILE
 from config import settings, list_sources, MUSIC_SOURCES
@@ -289,6 +289,23 @@ from telegram_bot import (
 
 START_TIME = time.time()
 
+_shutdown_event = asyncio.Event()
+
+
+def _signal_handler(signum, frame):
+    """Graceful shutdown signal handler."""
+    logger.info(f"Received signal {signum}, initiating graceful shutdown...")
+    _shutdown_event.set()
+
+
+# Register signal handlers for graceful shutdown
+try:
+    import signal as _signal
+    _signal.signal(_signal.SIGTERM, _signal_handler)
+    _signal.signal(_signal.SIGINT, _signal_handler)
+except Exception:
+    pass
+
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -309,8 +326,10 @@ async def lifespan(app: FastAPI):
             await set_bot_commands()
             if settings.telegram_bot_webhook_url:
                 await set_webhook(settings.telegram_bot_webhook_url)
-            else:
+            elif settings.telegram_bot_polling:
                 asyncio.create_task(start_bot_polling())
+            else:
+                logger.info("Telegram bot initialized (polling disabled - use webhook mode)")
 
     logger.info("Videl-Api v3.2.0 startup complete")
 
@@ -1963,6 +1982,66 @@ async def watchdog_recover_component(component: str, auth: dict = Depends(get_au
     except Exception as exc:
         log_error(exc, context=f"watchdog manual recovery {component}")
         raise HTTPException(status_code=500, detail=str(exc))
+
+
+# ---------------------------------------------------------------------------
+# Metrics (Prometheus-compatible)
+# ---------------------------------------------------------------------------
+
+@app.get("/v1/metrics", tags=["metrics"])
+async def metrics(auth: dict = Depends(get_auth)):
+    """Prometheus-compatible metrics endpoint."""
+    if not auth.get("admin", False):
+        raise HTTPException(status_code=403, detail="Admin access required")
+
+    import time as _time
+
+    health = watchdog.get_health()
+    dl_jobs = download_manager.list_jobs()
+
+    # Count jobs by status
+    status_counts = {}
+    for job in dl_jobs:
+        status_counts[job.get("status", "unknown")] = status_counts.get(job.get("status", "unknown"), 0) + 1
+
+    lines = [
+        '# HELP videl_api_uptime_seconds Uptime in seconds',
+        '# TYPE videl_api_uptime_seconds gauge',
+        f'videl_api_uptime_seconds {_time.time() - START_TIME}',
+        '',
+        '# HELP videl_api_health_status Component health status (1=healthy, 0=unhealthy)',
+        '# TYPE videl_api_health_status gauge',
+    ]
+
+    for name, comp in health.get("components", {}).items():
+        healthy = 1 if comp.get("healthy", False) else 0
+        lines.append(f'videl_api_health_status{{component="{name}"}} {healthy}')
+
+    lines.extend([
+        '',
+        '# HELP videl_api_download_jobs Total download jobs by status',
+        '# TYPE videl_api_download_jobs gauge',
+    ])
+
+    for status, count in status_counts.items():
+        lines.append(f'videl_api_download_jobs{{status="{status}"}} {count}')
+
+    lines.extend([
+        '',
+        '# HELP videl_api_active_connections Active WebSocket connections',
+        '# TYPE videl_api_active_connections gauge',
+        f'videl_api_active_connections {len(getattr(ws_manager, "_connections", {}))}',
+        '',
+        '# HELP videl_api_version_info API version info',
+        '# TYPE videl_api_version_info gauge',
+        f'videl_api_version_info{{version="3.2.0"}} 1',
+        '',
+    ])
+
+    return Response(
+        content="\n".join(lines),
+        media_type="text/plain; version=0.0.4; charset=utf-8",
+    )
 
 
 # ---------------------------------------------------------------------------
