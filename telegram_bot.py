@@ -1,18 +1,16 @@
 """
 Videl-Api Telegram Bot
 
-Full-featured Telegram Bot with:
-- Rich messages (inline keyboards, media groups, formatted text)
-- New Bot API features (inline queries, callback queries, invoices/Stars)
+Full-featured Telegram Bot built on aiogram 3.x:
+- Rich messages (inline keyboards, formatted text)
+- Inline queries, callback queries, inline keyboards
+- Telegram Stars payments (Pro tier upgrade)
 - Owner / Admin access control
-- Telegram Stars payments
 - User management, tiers, subscriptions
 - Search, download, lyrics, info from the API
 - Broadcast, stats, admin panel
 - Settings, language, notifications
 - Webhook integration with the FastAPI backend
-
-Built on aiogram 3.x.
 """
 
 from __future__ import annotations
@@ -26,7 +24,7 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Optional
 
-from aiogram import Bot, Dispatcher
+from aiogram import Bot
 from aiogram.types import (
     InlineKeyboardButton,
     InlineKeyboardMarkup,
@@ -66,13 +64,12 @@ logger = logging.getLogger("videl.telegram_bot")
 # ---------------------------------------------------------------------------
 
 _bot: Optional[Bot] = None
-_dp: Optional[Dispatcher] = None
 _bot_lock = asyncio.Lock()
 _bot_initialized = False
 
 
 async def get_bot() -> Optional[Bot]:
-    global _bot, _dp, _bot_initialized
+    global _bot, _bot_initialized
     async with _bot_lock:
         if _bot_initialized:
             return _bot
@@ -85,8 +82,8 @@ async def get_bot() -> Optional[Bot]:
             token=token,
             default=DefaultBotProperties(parse_mode=ParseMode.HTML),
         )
-        _dp = Dispatcher()
         _bot_initialized = True
+        logger.info("Telegram Bot (aiogram) initialized")
         return _bot
 
 
@@ -110,15 +107,18 @@ def _get_or_create_user(telegram_id: int, username: str = "", first_name: str = 
     for u in users:
         if u.get("telegram_id") == telegram_id:
             return u
+    # Owner detection: first user or matching owner id
+    is_owner = bool(settings.telegram_bot_owner_id and telegram_id == settings.telegram_bot_owner_id)
+    is_admin = is_owner or telegram_id in settings.telegram_bot_admins
     user = {
         "id": str(uuid.uuid4()),
         "telegram_id": telegram_id,
         "username": username,
         "first_name": first_name,
-        "tier": "free",
-        "scopes": ["read", "search"],
-        "is_admin": False,
-        "is_owner": False,
+        "tier": "owner" if is_owner else "free",
+        "scopes": ["read", "search", "download", "admin"] if is_owner else ["read", "search"],
+        "is_admin": is_admin,
+        "is_owner": is_owner,
         "created_at": datetime.now(timezone.utc).isoformat(),
         "updated_at": datetime.now(timezone.utc).isoformat(),
         "daily_requests": 0,
@@ -135,6 +135,7 @@ def _get_or_create_user(telegram_id: int, username: str = "", first_name: str = 
     }
     users.append(user)
     _save_users(users)
+    logger.info(f"New user registered: tg_id={telegram_id} owner={is_owner} admin={is_admin}")
     return user
 
 
@@ -256,8 +257,12 @@ def settings_keyboard() -> InlineKeyboardMarkup:
 # Rich message builders
 # ---------------------------------------------------------------------------
 
-def build_welcome_message(first_name: str, is_admin: bool = False) -> str:
-    admin_line = "\n👑 <b>Owner/Admin mode enabled.</b>" if is_admin else ""
+def build_welcome_message(first_name: str, is_admin: bool = False, is_owner: bool = False) -> str:
+    role_line = ""
+    if is_owner:
+        role_line = "\n👑 <b>Owner mode enabled.</b>"
+    elif is_admin:
+        role_line = "\n👮 <b>Admin mode enabled.</b>"
     return (
         f"🎵 <b>Welcome to Videl-Api Bot, {first_name}!</b>\n\n"
         f"A powerful multi-source media API right in your Telegram.\n\n"
@@ -270,11 +275,11 @@ def build_welcome_message(first_name: str, is_admin: bool = False) -> str:
         f"💳 Pay with Telegram Stars\n"
         f"📋 Manage playlists &amp; downloads\n"
         f"📊 View stats &amp; notifications\n\n"
-        f"Use /help to see all commands.{admin_line}"
+        f"Use /help to see all commands.{role_line}"
     )
 
 
-def build_help_message(is_admin: bool = False) -> str:
+def build_help_message(is_admin: bool = False, is_owner: bool = False) -> str:
     cmds = [
         ("/start", "Welcome & main menu"),
         ("/help", "Show this help message"),
@@ -294,12 +299,12 @@ def build_help_message(is_admin: bool = False) -> str:
         ("/feedback", "Send feedback"),
         ("/language", "Change interface language"),
     ]
-    if is_admin:
+    if is_admin or is_owner:
         cmds += [
-            ("/admin", "Admin panel (owner only)"),
-            ("/broadcast", "Broadcast to all users (owner only)"),
-            ("/users", "User management (owner only)"),
-            ("/stats", "Bot statistics (owner only)"),
+            ("/admin", "Admin panel"),
+            ("/broadcast", "Broadcast to all users"),
+            ("/users", "User management"),
+            ("/stats", "Bot statistics"),
         ]
 
     lines = [f"<b>/{c}</b> — {d}" for c, d in cmds]
@@ -354,8 +359,6 @@ async def _send_invoice(
     currency: str = "XTR",
     prices: list[dict] | None = None,
     provider_token: str = "",
-    max_tip_amount: Optional[int] = None,
-    suggested_tip_amounts: list[int] | None = None,
     start_parameter: str = "stars",
     reply_markup: Optional[InlineKeyboardMarkup] = None,
 ) -> None:
@@ -367,8 +370,6 @@ async def _send_invoice(
         currency=currency,
         prices=prices or [{"label": "Pro Tier", "amount": 100}],
         provider_token=provider_token,
-        max_tip_amount=max_tip_amount,
-        suggested_tip_amounts=suggested_tip_amounts,
         start_parameter=start_parameter,
         reply_markup=reply_markup,
     )
@@ -422,12 +423,25 @@ async def _answer_pre_checkout_query(
 
 
 # ---------------------------------------------------------------------------
+# Safe handler wrapper (prevents one bad handler from killing the bot)
+# ---------------------------------------------------------------------------
+
+async def _safe(handler_name: str, coro) -> None:
+    """Run a handler coroutine, logging any exception without crashing."""
+    try:
+        await coro
+    except Exception as exc:
+        logger.exception(f"Handler '{handler_name}' failed: {exc}")
+
+
+# ---------------------------------------------------------------------------
 # Handler functions
 # ---------------------------------------------------------------------------
 
 async def handle_start(bot: Bot, chat_id: int | str, user: dict, message_id: Optional[int] = None) -> None:
     is_admin = user.get("is_admin", False) or user.get("is_owner", False)
-    text = build_welcome_message(user.get("first_name", "User"), is_admin)
+    is_owner = user.get("is_owner", False)
+    text = build_welcome_message(user.get("first_name", "User"), is_admin, is_owner)
     kb = main_menu_keyboard(is_admin)
     if message_id:
         await bot.edit_message_text(
@@ -442,7 +456,8 @@ async def handle_start(bot: Bot, chat_id: int | str, user: dict, message_id: Opt
 
 async def handle_help(bot: Bot, chat_id: int | str, user: dict) -> None:
     is_admin = user.get("is_admin", False) or user.get("is_owner", False)
-    text = build_help_message(is_admin)
+    is_owner = user.get("is_owner", False)
+    text = build_help_message(is_admin, is_owner)
     kb = _keyboard([[_cb_button("⬅️ Back to Menu", "cb:menu")]])
     await _send_message(bot, chat_id, text, reply_markup=kb)
 
@@ -490,9 +505,87 @@ async def handle_search(bot: Bot, chat_id: int | str, user: dict, query: Optiona
     await _send_message(bot, chat_id, "\n".join(lines), reply_markup=_keyboard(buttons))
 
 
+async def handle_download_url(bot: Bot, chat_id: int | str, user: dict, url: str) -> None:
+    """Enqueue a download for a given URL."""
+    _increment_counter(user["telegram_id"], "download_count")
+    try:
+        job = await dl_enqueue_download(
+            url=url,
+            source="youtube",
+            user_id=user["telegram_id"],
+        )
+        job_id = job.get("job_id", "unknown") if isinstance(job, dict) else str(job)
+        await _send_message(
+            bot,
+            chat_id,
+            f"📥 <b>Download queued!</b>\n\n"
+            f"URL: {url}\n"
+            f"Job ID: <code>{job_id}</code>\n"
+            f"Use /history to track progress.",
+        )
+    except Exception as exc:
+        await _send_message(bot, chat_id, f"❌ Download failed: {exc}")
+
+
+async def handle_info(bot: Bot, chat_id: int | str, user: dict, query: Optional[str] = None) -> None:
+    if not query:
+        await _send_message(
+            bot,
+            chat_id,
+            "🎵 <b>Info</b>\n\nSend me a URL or search query.\nExample: /info https://youtu.be/...",
+            reply_markup=_keyboard([[_cb_button("⬅️ Back", "cb:menu")]]),
+        )
+        return
+    try:
+        info = await dl_extract_info(query)
+        if not info:
+            await _send_message(bot, chat_id, "❌ Could not extract info.")
+            return
+        title = info.get("title", "Unknown")
+        uploader = info.get("uploader", info.get("channel", "Unknown"))
+        dur = info.get("duration")
+        dur_str = f"{dur}s" if dur else "?"
+        views = info.get("view_count", 0)
+        lines = [
+            f"🎵 <b>{title}</b>\n",
+            f"👤 {uploader}",
+            f"⏱️ {dur_str}",
+            f"👁️ {views:,} views",
+        ]
+        await _send_message(bot, chat_id, "\n".join(lines))
+    except Exception as exc:
+        await _send_message(bot, chat_id, f"❌ Info failed: {exc}")
+
+
+async def handle_lyrics(bot: Bot, chat_id: int | str, user: dict, query: Optional[str] = None) -> None:
+    if not query:
+        await _send_message(
+            bot,
+            chat_id,
+            "📝 <b>Lyrics</b>\n\nSend me a song title or URL.\nExample: /lyrics imagine dragons believer",
+            reply_markup=_keyboard([[_cb_button("⬅️ Back", "cb:menu")]]),
+        )
+        return
+    try:
+        lyrics = await dl_extract_lyrics(query)
+        if not lyrics:
+            await _send_message(bot, chat_id, "🔍 No lyrics found.")
+            return
+        # Telegram message limit is 4096 chars
+        if len(lyrics) > 3800:
+            lyrics = lyrics[:3800] + "\n…"
+        await _send_message(bot, chat_id, f"📝 <b>Lyrics:</b>\n\n{lyrics}")
+    except Exception as exc:
+        await _send_message(bot, chat_id, f"❌ Lyrics failed: {exc}")
+
+
 async def handle_keys(bot: Bot, chat_id: int | str, user: dict) -> None:
     telegram_id = user["telegram_id"]
-    keys = auth_list_keys(telegram_id)
+    try:
+        keys = auth_list_keys(telegram_id)
+    except Exception as exc:
+        await _send_message(bot, chat_id, f"❌ Failed to list keys: {exc}")
+        return
     key_list = keys.get("keys", []) if isinstance(keys, dict) else []
 
     if not key_list:
@@ -555,7 +648,6 @@ async def handle_buy(bot: Bot, chat_id: int | str, user: dict) -> None:
             provider_token="",
             start_parameter="pro_upgrade",
         )
-        # Store pending payment
         users = _load_users()
         for u in users:
             if u.get("telegram_id") == user["telegram_id"]:
@@ -631,7 +723,11 @@ async def handle_playlist(bot: Bot, chat_id: int | str, user: dict) -> None:
 
 
 async def handle_history(bot: Bot, chat_id: int | str, user: dict) -> None:
-    jobs = await dl_list_jobs()
+    try:
+        jobs = await dl_list_jobs()
+    except Exception as exc:
+        await _send_message(bot, chat_id, f"❌ Failed to load history: {exc}")
+        return
     user_jobs = [j for j in jobs if j.get("user_id") == user["telegram_id"]] if isinstance(jobs, list) else []
     if not user_jobs:
         await _send_message(bot, chat_id, "📦 No download history yet.")
@@ -640,7 +736,8 @@ async def handle_history(bot: Bot, chat_id: int | str, user: dict) -> None:
     for j in user_jobs[-5:]:
         status = j.get("status", "unknown")
         title = j.get("title", "Unknown")
-        lines.append(f"• {title} — {status}")
+        progress = j.get("progress", 0)
+        lines.append(f"• {title} — {status} ({progress:.0f}%)")
     await _send_message(bot, chat_id, "\n".join(lines))
 
 
@@ -661,7 +758,6 @@ async def handle_feedback(bot: Bot, chat_id: int | str, user: dict, text: Option
             reply_markup=_keyboard([[_cb_button("⬅️ Back", "cb:menu")]]),
         )
         return
-    # Store feedback
     users = _load_users()
     for u in users:
         if u.get("telegram_id") == user["telegram_id"]:
@@ -749,183 +845,214 @@ async def handle_inline_query(bot: Bot, inline_query_id: str, query: str, user_i
 
 
 # ---------------------------------------------------------------------------
-# Update dispatcher
+# Update dispatcher (robust with per-handler error handling)
 # ---------------------------------------------------------------------------
 
 async def process_update(update: dict) -> None:
-    """Route a Telegram update to the appropriate handler."""
+    """Route a Telegram update to the appropriate handler.
+    
+    All handler exceptions are caught and logged so one bad update
+    cannot kill the polling loop.
+    """
     bot = await get_bot()
     if not bot:
         return
 
-    # --- Message ---
-    if "message" in update:
-        msg = update["message"]
-        chat_id = msg["chat"]["id"]
-        from_user = msg.get("from", {})
-        tg_id = from_user.get("id")
-        username = from_user.get("username", "")
-        first_name = from_user.get("first_name", "")
-        text = msg.get("text", "")
-        command = text.split(" ")[0] if text else ""
-        args = text[len(command):].strip() if text else ""
+    try:
+        # --- Message ---
+        if "message" in update:
+            msg = update["message"]
+            chat_id = msg["chat"]["id"]
+            from_user = msg.get("from", {})
+            tg_id = from_user.get("id")
+            username = from_user.get("username", "")
+            first_name = from_user.get("first_name", "")
+            text = msg.get("text", "")
+            command = text.split(" ")[0] if text else ""
+            args = text[len(command):].strip() if text else ""
 
-        user = _get_or_create_user(tg_id, username, first_name)
+            user = _get_or_create_user(tg_id, username, first_name)
 
-        if command == "/start":
-            await handle_start(bot, chat_id, user)
-        elif command == "/help":
-            await handle_help(bot, chat_id, user)
-        elif command == "/tier":
-            await handle_tier(bot, chat_id, user)
-        elif command == "/search":
-            await handle_search(bot, chat_id, user, args or None)
-        elif command == "/key":
-            await handle_keys(bot, chat_id, user)
-        elif command == "/createkey" or (command == "/key" and args == "create"):
-            await handle_create_key(bot, chat_id, user)
-        elif command == "/buy":
-            await handle_buy(bot, chat_id, user)
-        elif command == "/status":
-            await handle_status(bot, chat_id)
-        elif command == "/sources":
-            await handle_sources(bot, chat_id)
-        elif command == "/settings":
-            await handle_settings(bot, chat_id, user)
-        elif command == "/playlist":
-            await handle_playlist(bot, chat_id, user)
-        elif command == "/history":
-            await handle_history(bot, chat_id, user)
-        elif command == "/notify":
-            await handle_notify(bot, chat_id, user)
-        elif command == "/feedback":
-            await handle_feedback(bot, chat_id, user, args or None)
-        elif command == "/language":
-            await handle_language(bot, chat_id, user, args or None)
-        elif command == "/admin":
-            await handle_admin(bot, chat_id, user)
-        elif command == "/broadcast":
-            await handle_broadcast(bot, chat_id, user, args or None)
-        elif command in ("/download", "/info", "/lyrics"):
+            if command == "/start":
+                await _safe("handle_start", handle_start(bot, chat_id, user))
+            elif command == "/help":
+                await _safe("handle_help", handle_help(bot, chat_id, user))
+            elif command == "/tier":
+                await _safe("handle_tier", handle_tier(bot, chat_id, user))
+            elif command == "/search":
+                await _safe("handle_search", handle_search(bot, chat_id, user, args or None))
+            elif command == "/download":
+                await _safe("handle_download_url", handle_download_url(bot, chat_id, user, args or ""))
+            elif command == "/info":
+                await _safe("handle_info", handle_info(bot, chat_id, user, args or None))
+            elif command == "/lyrics":
+                await _safe("handle_lyrics", handle_lyrics(bot, chat_id, user, args or None))
+            elif command == "/key":
+                await _safe("handle_keys", handle_keys(bot, chat_id, user))
+            elif command == "/createkey" or (command == "/key" and args == "create"):
+                await _safe("handle_create_key", handle_create_key(bot, chat_id, user))
+            elif command == "/buy":
+                await _safe("handle_buy", handle_buy(bot, chat_id, user))
+            elif command == "/status":
+                await _safe("handle_status", handle_status(bot, chat_id))
+            elif command == "/sources":
+                await _safe("handle_sources", handle_sources(bot, chat_id))
+            elif command == "/settings":
+                await _safe("handle_settings", handle_settings(bot, chat_id, user))
+            elif command == "/playlist":
+                await _safe("handle_playlist", handle_playlist(bot, chat_id, user))
+            elif command == "/history":
+                await _safe("handle_history", handle_history(bot, chat_id, user))
+            elif command == "/notify":
+                await _safe("handle_notify", handle_notify(bot, chat_id, user))
+            elif command == "/feedback":
+                await _safe("handle_feedback", handle_feedback(bot, chat_id, user, args or None))
+            elif command == "/language":
+                await _safe("handle_language", handle_language(bot, chat_id, user, args or None))
+            elif command == "/admin":
+                await _safe("handle_admin", handle_admin(bot, chat_id, user))
+            elif command == "/broadcast":
+                await _safe("handle_broadcast", handle_broadcast(bot, chat_id, user, args or None))
+            elif command in ("/download", "/info", "/lyrics"):
+                if not args:
+                    await _send_message(
+                        bot,
+                        chat_id,
+                        f"🔧 {command} — send a URL or search query.",
+                        reply_markup=_keyboard([[_cb_button("⬅️ Menu", "cb:menu")]]),
+                    )
+            else:
+                await _safe("handle_start", handle_start(bot, chat_id, user))
+
+        # --- Callback query (inline keyboard) ---
+        elif "callback_query" in update:
+            cb = update["callback_query"]
+            cb_id = cb["id"]
+            data = cb.get("data", "")
+            chat_id = cb["message"]["chat"]["id"]
+            message_id = cb["message"]["message_id"]
+            from_user = cb.get("from", {})
+            tg_id = from_user.get("id")
+            user = _get_or_create_user(tg_id, from_user.get("username", ""), from_user.get("first_name", ""))
+
+            await _answer_callback_query(bot, cb_id)
+
+            if data == "cb:menu":
+                await _safe("handle_start", handle_start(bot, chat_id, user, message_id))
+            elif data == "cb:help":
+                await _safe("handle_help", handle_help(bot, chat_id, user))
+            elif data == "cb:tier":
+                await _safe("handle_tier", handle_tier(bot, chat_id, user))
+            elif data == "cb:keys":
+                await _safe("handle_keys", handle_keys(bot, chat_id, user))
+            elif data == "cb:key:create":
+                await _safe("handle_create_key", handle_create_key(bot, chat_id, user))
+            elif data == "cb:buy":
+                await _safe("handle_buy", handle_buy(bot, chat_id, user))
+            elif data == "cb:search":
+                await _safe("handle_search", handle_search(bot, chat_id, user, None))
+            elif data == "cb:download":
+                await _send_message(
+                    bot, chat_id,
+                    "📥 <b>Download</b>\n\nSend me a URL to download.\nExample: /download https://youtu.be/...",
+                    reply_markup=_keyboard([[_cb_button("⬅️ Back", "cb:menu")]]),
+                )
+            elif data == "cb:info":
+                await _send_message(
+                    bot, chat_id,
+                    "🎵 <b>Info</b>\n\nSend me a URL or search query.\nExample: /info https://youtu.be/...",
+                    reply_markup=_keyboard([[_cb_button("⬅️ Back", "cb:menu")]]),
+                )
+            elif data == "cb:lyrics":
+                await _send_message(
+                    bot, chat_id,
+                    "📝 <b>Lyrics</b>\n\nSend me a song title.\nExample: /lyrics imagine dragons believer",
+                    reply_markup=_keyboard([[_cb_button("⬅️ Back", "cb:menu")]]),
+                )
+            elif data == "cb:status":
+                await _safe("handle_status", handle_status(bot, chat_id))
+            elif data == "cb:sources":
+                await _safe("handle_sources", handle_sources(bot, chat_id))
+            elif data == "cb:settings":
+                await _safe("handle_settings", handle_settings(bot, chat_id, user))
+            elif data == "cb:settings:notify":
+                await _safe("handle_notify", handle_notify(bot, chat_id, user))
+            elif data == "cb:settings:lang":
+                await _safe("handle_language", handle_language(bot, chat_id, user))
+            elif data == "cb:playlist":
+                await _safe("handle_playlist", handle_playlist(bot, chat_id, user))
+            elif data == "cb:history":
+                await _safe("handle_history", handle_history(bot, chat_id, user))
+            elif data == "cb:admin":
+                await _safe("handle_admin", handle_admin(bot, chat_id, user))
+            elif data == "cb:admin:users":
+                await _send_message(bot, chat_id, "👥 User management via API: GET /v1/users")
+            elif data == "cb:admin:stats":
+                await _send_message(bot, chat_id, "📊 Stats via API: GET /v1/stats/global")
+            elif data == "cb:admin:broadcast":
+                await _send_message(bot, chat_id, "📢 Use /broadcast <message>")
+            elif data == "cb:admin:keys":
+                await _send_message(bot, chat_id, "🔑 All keys via API: GET /v1/web/owner/keys")
+            elif data == "cb:admin:system":
+                await _send_message(bot, chat_id, "⚙️ System status via API: GET /health")
+            elif data.startswith("cb:dl:"):
+                url = data[5:]
+                await _safe("handle_download_url", handle_download_url(bot, chat_id, user, url))
+            elif data.startswith("cb:tier:"):
+                tier = data.split(":")[2]
+                await _send_message(bot, chat_id, f"Tier {tier} — use /buy to upgrade to Pro.")
+            elif data.startswith("cb:lang:"):
+                lang = data.split(":")[2]
+                await _safe("handle_language", handle_language(bot, chat_id, user, lang))
+            else:
+                await _safe("handle_start", handle_start(bot, chat_id, user, message_id))
+
+        # --- Inline query ---
+        elif "inline_query" in update:
+            iq = update["inline_query"]
+            await _safe("handle_inline_query", handle_inline_query(bot, iq["id"], iq.get("query", ""), iq.get("from", {}).get("id", 0)))
+
+        # --- Pre-checkout query (Stars payment) ---
+        elif "pre_checkout_query" in update:
+            pcq = update["pre_checkout_query"]
+            await _answer_pre_checkout_query(bot, pcq["id"], ok=True)
+
+        # --- Successful payment ---
+        elif "message" in update and update["message"].get("successful_payment"):
+            msg = update["message"]
+            chat_id = msg["chat"]["id"]
+            tg_id = msg["from"]["id"]
+            payment = msg["successful_payment"]
+            amount = payment.get("total_amount", 0)
+            currency = payment.get("currency", "XTR")
+            payload_str = payment.get("invoice_payload", "")
+
+            user = _get_or_create_user(tg_id)
+            _set_user_field(tg_id, "tier", "pro")
+            _set_user_field(tg_id, "stars_balance", user.get("stars_balance", 0) + amount)
+            _set_user_field(tg_id, "lifetime_stars", user.get("lifetime_stars", 0) + amount)
+            _set_user_field(tg_id, "scopes", ["read", "search", "download"])
+
             await _send_message(
                 bot,
                 chat_id,
-                f"🔧 {command} — send a URL or use inline mode.",
-                reply_markup=_keyboard([[_cb_button("⬅️ Menu", "cb:menu")]]),
+                f"🎉 <b>Payment Successful!</b>\n\n"
+                f"Amount: {amount} {currency}\n"
+                f"Tier upgraded to: <b>PRO</b>\n\n"
+                f"Your API keys now have Pro limits.\n"
+                f"Use /key to view your keys.",
             )
-        else:
-            # Unknown command — show menu
-            await handle_start(bot, chat_id, user)
 
-    # --- Callback query (inline keyboard) ---
-    elif "callback_query" in update:
-        cb = update["callback_query"]
-        cb_id = cb["id"]
-        data = cb.get("data", "")
-        chat_id = cb["message"]["chat"]["id"]
-        message_id = cb["message"]["message_id"]
-        from_user = cb.get("from", {})
-        tg_id = from_user.get("id")
-        user = _get_or_create_user(tg_id, from_user.get("username", ""), from_user.get("first_name", ""))
+        # --- Chat member (bot added to group) ---
+        elif "my_chat_member" in update:
+            pass
 
-        await _answer_callback_query(bot, cb_id)
+        # --- Channel post ---
+        elif "channel_post" in update:
+            pass
 
-        if data == "cb:menu":
-            await handle_start(bot, chat_id, user, message_id)
-        elif data == "cb:help":
-            await handle_help(bot, chat_id, user)
-        elif data == "cb:tier":
-            await handle_tier(bot, chat_id, user)
-        elif data == "cb:keys":
-            await handle_keys(bot, chat_id, user)
-        elif data == "cb:key:create":
-            await handle_create_key(bot, chat_id, user)
-        elif data == "cb:buy":
-            await handle_buy(bot, chat_id, user)
-        elif data == "cb:search":
-            await handle_search(bot, chat_id, user, None)
-        elif data == "cb:status":
-            await handle_status(bot, chat_id)
-        elif data == "cb:sources":
-            await handle_sources(bot, chat_id)
-        elif data == "cb:settings":
-            await handle_settings(bot, chat_id, user)
-        elif data == "cb:settings:notify":
-            await handle_notify(bot, chat_id, user)
-        elif data == "cb:settings:lang":
-            await handle_language(bot, chat_id, user)
-        elif data == "cb:playlist":
-            await handle_playlist(bot, chat_id, user)
-        elif data == "cb:history":
-            await handle_history(bot, chat_id, user)
-        elif data == "cb:admin":
-            await handle_admin(bot, chat_id, user)
-        elif data == "cb:admin:users":
-            await _send_message(bot, chat_id, "👥 User management via API: GET /v1/users")
-        elif data == "cb:admin:stats":
-            await _send_message(bot, chat_id, "📊 Stats via API: GET /v1/stats/global")
-        elif data == "cb:admin:broadcast":
-            await _send_message(bot, chat_id, "📢 Use /broadcast <message>")
-        elif data == "cb:admin:keys":
-            await _send_message(bot, chat_id, "🔑 All keys via API: GET /v1/web/owner/keys")
-        elif data == "cb:admin:system":
-            await _send_message(bot, chat_id, "⚙️ System status via API: GET /health")
-        elif data.startswith("cb:dl:"):
-            url = data[5:]
-            await handle_search(bot, chat_id, user, f"download {url}")
-        elif data.startswith("cb:tier:"):
-            tier = data.split(":")[2]
-            await _send_message(bot, chat_id, f"Tier {tier} — use /buy to upgrade to Pro.")
-        elif data.startswith("cb:lang:"):
-            lang = data.split(":")[2]
-            await handle_language(bot, chat_id, user, lang)
-        else:
-            await handle_start(bot, chat_id, user, message_id)
-
-    # --- Inline query ---
-    elif "inline_query" in update:
-        iq = update["inline_query"]
-        await handle_inline_query(bot, iq["id"], iq.get("query", ""), iq.get("from", {}).get("id", 0))
-
-    # --- Pre-checkout query (Stars payment) ---
-    elif "pre_checkout_query" in update:
-        pcq = update["pre_checkout_query"]
-        await _answer_pre_checkout_query(bot, pcq["id"], ok=True)
-
-    # --- Successful payment ---
-    elif "message" in update and update["message"].get("successful_payment"):
-        msg = update["message"]
-        chat_id = msg["chat"]["id"]
-        tg_id = msg["from"]["id"]
-        payment = msg["successful_payment"]
-        amount = payment.get("total_amount", 0)
-        currency = payment.get("currency", "XTR")
-        payload_str = payment.get("invoice_payload", "")
-
-        user = _get_or_create_user(tg_id)
-        # Upgrade to Pro
-        _set_user_field(tg_id, "tier", "pro")
-        _set_user_field(tg_id, "stars_balance", user.get("stars_balance", 0) + amount)
-        _set_user_field(tg_id, "lifetime_stars", user.get("lifetime_stars", 0) + amount)
-        _set_user_field(tg_id, "scopes", ["read", "search", "download"])
-
-        await _send_message(
-            bot,
-            chat_id,
-            f"🎉 <b>Payment Successful!</b>\n\n"
-            f"Amount: {amount} {currency}\n"
-            f"Tier upgraded to: <b>PRO</b>\n\n"
-            f"Your API keys now have Pro limits.\n"
-            f"Use /key to view your keys.",
-        )
-
-    # --- Chat member (bot added to group) ---
-    elif "my_chat_member" in update:
-        pass  # Could handle group additions here
-
-    # --- Channel post ---
-    elif "channel_post" in update:
-        pass
+    except Exception as exc:
+        logger.exception(f"process_update top-level error: {exc}")
 
 
 # ---------------------------------------------------------------------------
@@ -960,9 +1087,9 @@ async def set_bot_commands() -> None:
         {"command": "start", "description": "Welcome & main menu"},
         {"command": "help", "description": "Show all commands"},
         {"command": "search", "description": "Search music & media"},
-        {"command": "download", "description": "Download a track"},
-        {"command": "info", "description": "Get track info"},
-        {"command": "lyrics", "description": "Get lyrics"},
+        {"command": "download", "description": "Download a track by URL"},
+        {"command": "info", "description": "Get track/album info"},
+        {"command": "lyrics", "description": "Get lyrics for a track"},
         {"command": "key", "description": "Manage API keys"},
         {"command": "createkey", "description": "Create a new API key"},
         {"command": "tier", "description": "View subscription tier"},
@@ -987,11 +1114,9 @@ async def set_bot_commands() -> None:
 async def start_bot_polling() -> None:
     """Long-polling entry point (for standalone bot mode)."""
     bot = await get_bot()
-    dp = _dp
-    if not bot or not dp:
+    if not bot:
         return
 
-    # Feed updates via aiogram's Dispatcher for polling
     offset = 0
     logger.info("Telegram bot polling started")
     while True:
@@ -999,7 +1124,6 @@ async def start_bot_polling() -> None:
             updates = await bot.get_updates(offset=offset, timeout=30, limit=100)
             for upd in updates:
                 offset = upd.update_id + 1
-                # Convert aiogram Update object to dict for process_update
                 await process_update(upd.model_dump())
         except Exception as exc:
             msg = str(exc)
