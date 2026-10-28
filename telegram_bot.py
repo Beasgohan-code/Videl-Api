@@ -931,6 +931,9 @@ async def process_update(update: dict) -> None:
             if not from_user:
                 from_user = {}
             tg_id = from_user.get("id")
+            if not tg_id:
+                logger.warning("Received message without user ID")
+                return
             username = from_user.get("username", "")
             first_name = from_user.get("first_name", "")
             text = msg.get("text", "")
@@ -1011,6 +1014,10 @@ async def process_update(update: dict) -> None:
             if not from_user:
                 from_user = {}
             tg_id = from_user.get("id")
+            if not tg_id:
+                logger.warning("Received callback_query without user ID")
+                await _answer_callback_query(bot, cb_id)
+                return
             user = _get_or_create_user(tg_id, from_user.get("username", ""), from_user.get("first_name", ""))
 
             await _answer_callback_query(bot, cb_id)
