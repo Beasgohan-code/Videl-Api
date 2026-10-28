@@ -239,6 +239,23 @@ class AdvancedDownloadManager:
 
             await asyncio.sleep(0.2)
 
+    async def update_progress(self, job_id: str, progress: float, downloaded_size: Optional[int] = None) -> bool:
+        """Update download progress and broadcast via WebSocket."""
+        job = self._jobs.get(job_id)
+        if not job:
+            return False
+        job.progress = min(100.0, max(0.0, progress))
+        job.updated_at = datetime.now(timezone.utc).isoformat()
+        if downloaded_size is not None:
+            job.downloaded_size = downloaded_size
+        await ws_manager.send_to_user(job.user_id, {
+            "type": "download_progress",
+            "job_id": job_id,
+            "progress": job.progress,
+            "downloaded_size": job.downloaded_size,
+        })
+        return True
+
     async def _download(self, job: AdvancedDownloadJob) -> None:
         try:
             output_dir = settings.download_dir / job.job_id

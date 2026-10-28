@@ -63,7 +63,7 @@ from pydantic import BaseModel, Field
 from fastapi import Depends, FastAPI, HTTPException, status, WebSocket, WebSocketDisconnect
 from starlette.background import BackgroundTask
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, RedirectResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, RedirectResponse, Response
 
 from auth import create_api_key, list_api_keys, revoke_api_key, validate_api_key, _load_json, _save_json, KEYS_FILE
 from config import settings, list_sources, MUSIC_SOURCES
@@ -85,7 +85,7 @@ from m3u8_downloader import (
 )
 from logger import (
     get_logger, set_request_id, clear_request_id, log_request,
-    log_download_event, log_auth_event, log_error,
+    log_download_event, log_auth_event, log_error, request_id_var,
 )
 from watchdog import watchdog
 
@@ -387,6 +387,34 @@ async def request_logging_middleware(request, call_next):
         raise
     finally:
         clear_request_id()
+
+
+# Global exception handler for consistent error responses
+@app.exception_handler(HTTPException)
+async def http_exception_handler(request, exc: HTTPException):
+    return JSONResponse(
+        status_code=exc.status_code,
+        content={
+            "error": exc.detail if isinstance(exc.detail, str) else "HTTP error",
+            "detail": str(exc.detail) if not isinstance(exc.detail, str) else None,
+            "code": exc.status_code,
+        },
+        headers={"X-Request-ID": request_id_var.get() or "-"},
+    )
+
+
+@app.exception_handler(Exception)
+async def general_exception_handler(request, exc: Exception):
+    log_error(exc, context=f"unhandled {request.method} {request.url.path}")
+    return JSONResponse(
+        status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+        content={
+            "error": "Internal server error",
+            "detail": str(exc),
+            "code": 500,
+        },
+        headers={"X-Request-ID": request_id_var.get() or "-"},
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -1319,6 +1347,20 @@ async def advanced_download_status(job_id: str, _: dict = Depends(get_auth)):
     if not job:
         raise HTTPException(status_code=404, detail="Job not found")
     return job.to_dict()
+
+
+@app.post("/v1/download/advanced/progress/{job_id}", tags=["download"])
+async def advanced_download_progress(
+    job_id: str,
+    progress: float,
+    downloaded_size: Optional[int] = None,
+    _: dict = Depends(get_auth),
+):
+    """Update download progress (used by external downloaders)."""
+    ok = await download_manager.update_progress(job_id, progress, downloaded_size)
+    if not ok:
+        raise HTTPException(status_code=404, detail="Job not found")
+    return {"updated": True, "job_id": job_id, "progress": progress}
 
 
 @app.post("/v1/download/advanced/pause/{job_id}", tags=["download"])
@@ -3106,6 +3148,19 @@ async def key_usage_get(key_id: str, _: dict = Depends(get_auth)):
     if not usage:
         return {"key_id": key_id, "total_requests": 0}
     return usage
+
+
+@app.get("/v1/keys/{key_id}/rate-limit", tags=["keys"])
+async def key_rate_limit_status(key_id: str, _: dict = Depends(get_auth)):
+    """Get the current rate limit status for an API key."""
+    result = rate_limiter.check(key_id, cost=0)  # cost=0 means just check, don't consume
+    return {
+        "key_id": key_id,
+        "limit": result.limit,
+        "remaining": result.remaining,
+        "reset_after_seconds": result.reset_after,
+        "retry_after_seconds": result.retry_after,
+    }
 
 
 @app.post("/v1/keys/{key_id}/concurrency", tags=["keys"])

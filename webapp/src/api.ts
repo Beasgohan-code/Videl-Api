@@ -174,6 +174,10 @@ class ApiClient {
     return this.request(`/v1/keys/${keyId}/concurrency`);
   }
 
+  async getKeyRateLimit(keyId: string): Promise<ApiResponse<any>> {
+    return this.request(`/v1/keys/${keyId}/rate-limit`);
+  }
+
   async shareKey(keyId: string, expiresInHours: number, maxUses?: number): Promise<ApiResponse<any>> {
     return this.request("/v1/keys/share", {
       method: "POST",

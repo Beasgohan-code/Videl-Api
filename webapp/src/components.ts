@@ -1573,6 +1573,50 @@ export async function renderSettings(container: HTMLElement): Promise<void> {
     }),
   ]));
 
+  // Download Preferences
+  sections.appendChild(renderSettingSection("Downloads", [
+    renderSettingRow("Max Concurrent Downloads", async () => {
+      const current = s.getState().user?.max_concurrent_downloads || 3;
+      const next = current === 3 ? 5 : current === 5 ? 10 : 3;
+      s.setState({ user: { ...s.getState().user!, max_concurrent_downloads: next } });
+      try {
+        await api.createAdvancedDownload({ url: "", priority: "normal" });
+      } catch {}
+    }, `Current: ${s.getState().user?.max_concurrent_downloads || 3}`),
+    renderSettingRow("Default Format", () => {
+      const formats = ["mp3", "m4a", "flac", "wav"];
+      const current = s.getState().user?.default_format || "mp3";
+      const idx = formats.indexOf(current);
+      const next = formats[(idx + 1) % formats.length];
+      s.setState({ user: { ...s.getState().user!, default_format: next } });
+    }, `Current: ${s.getState().user?.default_format || "mp3"}`),
+  ]));
+
+  // API Key Management
+  sections.appendChild(renderSettingSection("API Keys", [
+    renderSettingRow("View All Keys", () => {
+      s.setCurrentView("dashboard");
+    }, "Manage your API keys"),
+    renderSettingRow("Rate Limit Status", async () => {
+      try {
+        const keysRes = await api.listKeys();
+        if (keysRes.ok && keysRes.data) {
+          const keys = keysRes.data.keys || [];
+          if (keys.length > 0) {
+            const key = keys[0];
+            const res = await api.getKeyRateLimit(key.key_id || key.key_prefix);
+            if (res.ok) {
+              const rl = res.data;
+              showAlert(`Rate Limit:\nLimit: ${rl.limit} req/min\nRemaining: ${rl.remaining}\nReset in: ${rl.reset_after_seconds}s`);
+            }
+          }
+        }
+      } catch (err: any) {
+        showAlert(err.message || "Failed to get rate limit");
+      }
+    }, "Check current rate limit"),
+  ]));
+
   container.appendChild(
     el("div", {
       style: { maxWidth: "600px", margin: "0 auto" },
