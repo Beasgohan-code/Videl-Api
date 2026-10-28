@@ -37,6 +37,7 @@ from aiogram.client.default import DefaultBotProperties
 
 from config import settings, list_all_sources, MUSIC_SOURCES
 from downloader import (
+    DownloadJob,
     search as dl_search,
     extract_info as dl_extract_info,
     extract_lyrics as dl_extract_lyrics,
@@ -566,18 +567,18 @@ async def handle_download_url(bot: Bot, chat_id: int | str, user: dict, url: str
     """Enqueue a download for a given URL."""
     _increment_counter(user["telegram_id"], "download_count")
     try:
-        job = await dl_enqueue_download(
+        job = DownloadJob(
+            job_id=uuid.uuid4().hex,
             url=url,
             source="youtube",
-            user_id=user["telegram_id"],
         )
-        job_id = job.get("job_id", "unknown") if isinstance(job, dict) else str(job)
+        await dl_enqueue_download(job)
         await _send_message(
             bot,
             chat_id,
             f"📥 <b>Download queued!</b>\n\n"
             f"URL: {url}\n"
-            f"Job ID: <code>{job_id}</code>\n"
+            f"Job ID: <code>{job.job_id}</code>\n"
             f"Use /history to track progress.",
         )
     except Exception as exc:

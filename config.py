@@ -535,6 +535,18 @@ def list_all_sources() -> list[dict]:
     return out
 
 
+def search_prefix_for(source_id: str) -> Optional[str]:
+    """Return the yt-dlp search prefix for a given source, or None if not searchable."""
+    info = MUSIC_SOURCES.get(source_id)
+    if info:
+        return info.get("search_prefix")
+    # Also check ALL_SOURCES for non-music sources
+    info = ALL_SOURCES.get(source_id)
+    if info:
+        return info.get("search_prefix")
+    return None
+
+
 def list_sources() -> list[dict]:
     """Return music sources only (for backward compatibility)."""
     out = []
