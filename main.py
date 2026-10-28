@@ -291,6 +291,7 @@ from telegram_bot import (
 START_TIME = time.time()
 
 _shutdown_event = asyncio.Event()
+_polling_task: Optional[asyncio.Task] = None
 
 
 def _signal_handler(signum, frame):
@@ -310,6 +311,7 @@ except Exception:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    global _polling_task
     settings.download_dir.mkdir(parents=True, exist_ok=True)
     await cleanup_stale_downloads()
 
@@ -338,7 +340,7 @@ async def lifespan(app: FastAPI):
                     f"<b>Token set:</b> Yes",
                 )
             elif settings.telegram_bot_polling:
-                asyncio.create_task(start_bot_polling())
+                _polling_task = asyncio.create_task(start_bot_polling())
                 logger.info("Telegram bot initialized (polling mode)")
                 await _send_owner_message(
                     bot,
@@ -349,7 +351,7 @@ async def lifespan(app: FastAPI):
                 )
             else:
                 # Default to polling when token is set but no delivery method configured
-                asyncio.create_task(start_bot_polling())
+                _polling_task = asyncio.create_task(start_bot_polling())
                 logger.info("Telegram bot initialized (auto polling mode)")
                 await _send_owner_message(
                     bot,
@@ -366,6 +368,14 @@ async def lifespan(app: FastAPI):
     # Cleanup
     scheduler.stop()
     await watchdog.stop()
+    # Cancel Telegram polling task if running
+    if _polling_task and not _polling_task.done():
+        _polling_task.cancel()
+        try:
+            await _polling_task
+        except asyncio.CancelledError:
+            pass
+        _polling_task = None
     bot = await get_bot()
     if bot:
         await _send_owner_message(
