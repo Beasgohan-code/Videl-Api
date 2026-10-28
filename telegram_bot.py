@@ -919,12 +919,17 @@ async def process_update(update: dict) -> None:
         # --- Message ---
         if "message" in update:
             msg = update["message"]
+            if not msg:
+                logger.warning("Received message update with None message")
+                return
             chat = msg.get("chat")
             if not chat:
                 logger.warning("Received message without chat field")
                 return
             chat_id = chat["id"]
             from_user = msg.get("from", {})
+            if not from_user:
+                from_user = {}
             tg_id = from_user.get("id")
             username = from_user.get("username", "")
             first_name = from_user.get("first_name", "")
@@ -995,9 +1000,16 @@ async def process_update(update: dict) -> None:
                 logger.warning("Received callback_query without message field")
                 await _answer_callback_query(bot, cb_id)
                 return
-            chat_id = cb_message["chat"]["id"]
+            cb_chat = cb_message.get("chat")
+            if not cb_chat:
+                logger.warning("Received callback_query without chat field")
+                await _answer_callback_query(bot, cb_id)
+                return
+            chat_id = cb_chat["id"]
             message_id = cb_message["message_id"]
             from_user = cb.get("from", {})
+            if not from_user:
+                from_user = {}
             tg_id = from_user.get("id")
             user = _get_or_create_user(tg_id, from_user.get("username", ""), from_user.get("first_name", ""))
 
