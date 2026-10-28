@@ -1298,6 +1298,15 @@ class AdvancedDownloadRequest(BaseModel):
     use_aria2c: bool = True
     embed_metadata: bool = True
     fetch_lyrics: bool = False
+    # Cookies support
+    cookies: Optional[str] = None
+    cookies_file: Optional[str] = None
+    # More download options
+    proxy: Optional[str] = None
+    user_agent: Optional[str] = None
+    referer: Optional[str] = None
+    max_filesize: Optional[int] = None  # MB
+    skip_download: bool = False
 
 
 @app.post("/v1/download/advanced", tags=["download"])
@@ -1323,6 +1332,13 @@ async def advanced_download_create(
         use_aria2c=payload.use_aria2c,
         embed_metadata=payload.embed_metadata,
         fetch_lyrics=payload.fetch_lyrics,
+        cookies=payload.cookies,
+        cookies_file=payload.cookies_file,
+        proxy=payload.proxy,
+        user_agent=payload.user_agent,
+        referer=payload.referer,
+        max_filesize=payload.max_filesize,
+        skip_download=payload.skip_download,
     )
     log_download_event("created", job.job_id, user_id, {
         "url": payload.url,

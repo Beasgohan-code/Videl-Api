@@ -110,6 +110,8 @@ def _build_ydl_opts(
     cookies: Optional[str] = None,
     cookies_file: Optional[str] = None,
     proxy: Optional[str] = None,
+    user_agent: Optional[str] = None,
+    referer: Optional[str] = None,
     skip_download: bool = False,
     socket_timeout: Optional[int] = None,
     retries: Optional[int] = None,
@@ -128,9 +130,9 @@ def _build_ydl_opts(
         "noplaylist": False,
         "quiet": True,
         "no_warnings": True,
-        "socket_timeout": socket_timeout or settings.yt_dlp_socket_timeout,
-        "retries": retries or settings.yt_dlp_retries,
-        "fragment_retries": fragment_retries or settings.yt_dlp_fragment_retries,
+        "socket_timeout": socket_timeout or settings.download_socket_timeout,
+        "retries": retries or settings.download_retries,
+        "fragment_retries": fragment_retries or settings.download_fragment_retries,
         "continuedl": True,
         "nopart": True,
     }
@@ -151,6 +153,15 @@ def _build_ydl_opts(
     if proxy:
         opts["proxy"] = proxy
 
+    # --- HTTP headers (user-agent, referer) ---
+    headers: dict[str, str] = {}
+    if user_agent:
+        headers["User-Agent"] = user_agent
+    if referer:
+        headers["Referer"] = referer
+    if headers:
+        opts["httpheaders"] = headers
+
     # --- External downloader (multipart, faster) ---
     if use_aria2c and _has_aria2c():
         opts["external_downloader"] = "aria2c"
@@ -169,16 +180,16 @@ def _build_ydl_opts(
 
 
 def _resolve_proxy(source_id: Optional[str]) -> Optional[str]:
-    if settings.yt_dlp_proxy:
-        return settings.yt_dlp_proxy
+    if settings.download_proxy:
+        return settings.download_proxy
     return None
 
 
 def _resolve_cookies(source_id: Optional[str]) -> tuple[Optional[str], Optional[str]]:
-    cookies = settings.yt_dlp_cookies
-    cookies_file = settings.yt_dlp_cookies_file
-    if source_id and source_id in settings.yt_dlp_cookies_files:
-        cookies_file = settings.yt_dlp_cookies_files[source_id]
+    cookies = settings.download_cookies
+    cookies_file = settings.download_cookies_file
+    if source_id and source_id in settings.download_cookies_files:
+        cookies_file = settings.download_cookies_files[source_id]
     return cookies, cookies_file
 
 
@@ -242,7 +253,7 @@ def extract_info_sync(
     resolved_source = _guess_source(url, source)
     cookies, cookies_file = _resolve_cookies(resolved_source)
     proxy = _resolve_proxy(resolved_source)
-    fmt = format_selector or settings.yt_dlp_format
+    fmt = format_selector or settings.download_format
 
     tmp_dir = settings.download_dir / "_extract"
     opts = _build_ydl_opts(
@@ -257,7 +268,7 @@ def extract_info_sync(
     )
 
     last_error: Optional[Exception] = None
-    for attempt in range(1, settings.yt_dlp_retries + 1):
+    for attempt in range(1, settings.download_retries + 1):
         try:
             with yt_dlp.YoutubeDL(opts) as ydl:
                 info = ydl.extract_info(url, download=False, process=True)
@@ -266,7 +277,7 @@ def extract_info_sync(
             last_error = exc
         except Exception as exc:
             last_error = exc
-        if attempt < settings.yt_dlp_retries:
+        if attempt < settings.download_retries:
             time.sleep(0.8 * attempt)
     raise RuntimeError(f"yt-dlp extraction failed: {last_error}")
 
@@ -279,11 +290,23 @@ def download_audio_sync(
     format_selector: Optional[str] = None,
     use_aria2c: bool = False,
     job: Optional[DownloadJob] = None,
+    cookies: Optional[str] = None,
+    cookies_file: Optional[str] = None,
+    proxy: Optional[str] = None,
+    user_agent: Optional[str] = None,
+    referer: Optional[str] = None,
+    max_filesize_mb: Optional[int] = None,
+    skip_download: bool = False,
 ) -> Path:
     resolved_source = _guess_source(url, source)
-    cookies, cookies_file = _resolve_cookies(resolved_source)
-    proxy = _resolve_proxy(resolved_source)
-    fmt = format_selector or settings.yt_dlp_format
+    # Job-provided values override settings-based resolution
+    resolved_cookies, resolved_cookies_file = _resolve_cookies(resolved_source)
+    if cookies is not None:
+        resolved_cookies = cookies
+    if cookies_file is not None:
+        resolved_cookies_file = cookies_file
+    resolved_proxy = proxy if proxy is not None else _resolve_proxy(resolved_source)
+    fmt = format_selector or settings.download_format
 
     # Progress hook for job updates
     def progress_hook(d: dict) -> None:
@@ -306,18 +329,21 @@ def download_audio_sync(
     opts = _build_ydl_opts(
         output_dir=output_dir,
         format_selector=fmt,
-        cookies=cookies,
-        cookies_file=cookies_file,
-        proxy=proxy,
-        max_filesize_mb=settings.download_max_filesize_mb or None,
+        cookies=resolved_cookies,
+        cookies_file=resolved_cookies_file,
+        proxy=resolved_proxy,
+        user_agent=user_agent,
+        referer=referer,
+        max_filesize_mb=max_filesize_mb if max_filesize_mb is not None else (settings.download_max_filesize_mb or None),
         use_aria2c=use_aria2c,
         sponsorblock=True,
+        skip_download=skip_download,
     )
     opts["progress_hooks"] = [progress_hook]
 
     last_error: Optional[Exception] = None
     downloaded: Optional[Path] = None
-    for attempt in range(1, settings.yt_dlp_retries + 1):
+    for attempt in range(1, settings.download_retries + 1):
         if job and job.cancelled:
             raise RuntimeError("Download cancelled by user")
         try:
@@ -338,7 +364,7 @@ def download_audio_sync(
             last_error = exc
         except Exception as exc:
             last_error = exc
-        if attempt < settings.yt_dlp_retries:
+        if attempt < settings.download_retries:
             time.sleep(0.8 * attempt)
     else:
         raise RuntimeError(f"yt-dlp download failed: {last_error}")
@@ -363,12 +389,12 @@ def search_sync(
     tmp_dir = settings.download_dir / "_extract"
     opts = _build_ydl_opts(
         output_dir=tmp_dir,
-        format_selector=settings.yt_dlp_format,
+        format_selector=settings.download_format,
         skip_download=True,
     )
 
     last_error: Optional[Exception] = None
-    for attempt in range(1, settings.yt_dlp_retries + 1):
+    for attempt in range(1, settings.download_retries + 1):
         try:
             with yt_dlp.YoutubeDL(opts) as ydl:
                 info = ydl.extract_info(search_url, download=False, process=True)
@@ -378,7 +404,7 @@ def search_sync(
             last_error = exc
         except Exception as exc:
             last_error = exc
-        if attempt < settings.yt_dlp_retries:
+        if attempt < settings.download_retries:
             time.sleep(0.8 * attempt)
     raise RuntimeError(f"yt-dlp search failed: {last_error}")
 
@@ -596,6 +622,13 @@ async def download_audio(
     format_selector: Optional[str] = None,
     use_aria2c: bool = False,
     job: Optional[DownloadJob] = None,
+    cookies: Optional[str] = None,
+    cookies_file: Optional[str] = None,
+    proxy: Optional[str] = None,
+    user_agent: Optional[str] = None,
+    referer: Optional[str] = None,
+    max_filesize_mb: Optional[int] = None,
+    skip_download: bool = False,
 ) -> Path:
     loop = asyncio.get_running_loop()
     return await loop.run_in_executor(
@@ -603,6 +636,9 @@ async def download_audio(
         lambda: download_audio_sync(
             url, source=source, output_dir=output_dir,
             format_selector=format_selector, use_aria2c=use_aria2c, job=job,
+            cookies=cookies, cookies_file=cookies_file, proxy=proxy,
+            user_agent=user_agent, referer=referer,
+            max_filesize_mb=max_filesize_mb, skip_download=skip_download,
         ),
     )
 

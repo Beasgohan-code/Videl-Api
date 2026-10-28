@@ -25,3 +25,5 @@ htmlcov/
 .DS_Store
 eldian/.git/
 node_modules/
+webapp/dist/
+webapp/package-lock.json

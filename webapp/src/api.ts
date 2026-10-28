@@ -370,6 +370,13 @@ class ApiClient {
     use_aria2c?: boolean;
     embed_metadata?: boolean;
     fetch_lyrics?: boolean;
+    cookies?: string;
+    cookies_file?: string;
+    proxy?: string;
+    user_agent?: string;
+    referer?: string;
+    max_filesize?: number;
+    skip_download?: boolean;
   }): Promise<ApiResponse<any>> {
     return this.request("/v1/download/advanced", {
       method: "POST",

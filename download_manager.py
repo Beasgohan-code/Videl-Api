@@ -67,6 +67,13 @@ class AdvancedDownloadJob:
     use_aria2c: bool = True
     embed_metadata: bool = True
     fetch_lyrics: bool = False
+    cookies: Optional[str] = None
+    cookies_file: Optional[str] = None
+    proxy: Optional[str] = None
+    user_agent: Optional[str] = None
+    referer: Optional[str] = None
+    max_filesize: Optional[int] = None
+    skip_download: bool = False
     title: str = ""
     total_size: Optional[int] = None
     downloaded_size: int = 0
@@ -91,6 +98,13 @@ class AdvancedDownloadJob:
             "title": self.title,
             "total_size": self.total_size,
             "downloaded_size": self.downloaded_size,
+            "cookies": self.cookies,
+            "cookies_file": self.cookies_file,
+            "proxy": self.proxy,
+            "user_agent": self.user_agent,
+            "referer": self.referer,
+            "max_filesize": self.max_filesize,
+            "skip_download": self.skip_download,
         }
 
 
@@ -151,6 +165,13 @@ class AdvancedDownloadManager:
             use_aria2c=kwargs.get("use_aria2c", True),
             embed_metadata=kwargs.get("embed_metadata", True),
             fetch_lyrics=kwargs.get("fetch_lyrics", False),
+            cookies=kwargs.get("cookies"),
+            cookies_file=kwargs.get("cookies_file"),
+            proxy=kwargs.get("proxy"),
+            user_agent=kwargs.get("user_agent"),
+            referer=kwargs.get("referer"),
+            max_filesize=kwargs.get("max_filesize"),
+            skip_download=kwargs.get("skip_download", False),
         )
         self._jobs[job_id] = job
         self._heap_push(job)
@@ -277,6 +298,13 @@ class AdvancedDownloadManager:
                     output_dir=output_dir,
                     format_selector=job.format_selector,
                     use_aria2c=job.use_aria2c,
+                    cookies=job.cookies,
+                    cookies_file=job.cookies_file,
+                    proxy=job.proxy,
+                    user_agent=job.user_agent,
+                    referer=job.referer,
+                    max_filesize_mb=job.max_filesize,
+                    skip_download=job.skip_download,
                 )
 
                 if job.job_id in self._cancelled:

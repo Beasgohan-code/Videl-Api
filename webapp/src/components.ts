@@ -1283,16 +1283,51 @@ export async function renderDownloads(container: HTMLElement): Promise<void> {
                 el("option", { value: "low", textContent: "Low" }),
               ],
             }),
+            // More options toggle
+            el("button", {
+              id: "dl-more-toggle",
+              textContent: "More options ▾",
+              style: {
+                padding: "14px",
+                border: "1px solid #ddd",
+                borderRadius: "10px",
+                fontSize: "0.9rem",
+                background: "#f8f9fa",
+                cursor: "pointer",
+              },
+              onClick: () => {
+                const more = document.getElementById("dl-more-options");
+                if (more) {
+                  const hidden = more.style.display === "none";
+                  more.style.display = hidden ? "grid" : "none";
+                }
+              },
+            }),
             btnPrimary("Add", async () => {
               const input = document.getElementById("dl-url") as HTMLInputElement;
               const priority = (document.getElementById("dl-priority") as HTMLSelectElement).value;
               const url = input.value.trim();
               if (!url) return;
 
+              const cookies = (document.getElementById("dl-cookies") as HTMLTextAreaElement)?.value.trim() || undefined;
+              const cookiesFile = (document.getElementById("dl-cookies-file") as HTMLInputElement)?.value.trim() || undefined;
+              const proxy = (document.getElementById("dl-proxy") as HTMLInputElement)?.value.trim() || undefined;
+              const userAgent = (document.getElementById("dl-user-agent") as HTMLInputElement)?.value.trim() || undefined;
+              const referer = (document.getElementById("dl-referer") as HTMLInputElement)?.value.trim() || undefined;
+              const maxFilesize = (document.getElementById("dl-max-filesize") as HTMLInputElement)?.value.trim();
+              const skipDownload = (document.getElementById("dl-skip-download") as HTMLInputElement)?.checked;
+
               try {
                 const res = await api.createAdvancedDownload({
                   url,
                   priority: priority as any,
+                  cookies,
+                  cookies_file: cookiesFile,
+                  proxy,
+                  user_agent: userAgent,
+                  referer,
+                  max_filesize: maxFilesize ? parseInt(maxFilesize, 10) : undefined,
+                  skip_download: skipDownload || false,
                 });
                 if (res.ok && res.data) {
                   input.value = "";
@@ -1304,6 +1339,104 @@ export async function renderDownloads(container: HTMLElement): Promise<void> {
               } catch (err: any) {
                 showAlert(err.message || "Error adding download");
               }
+            }),
+            // More options panel (hidden by default)
+            el("div", {
+              id: "dl-more-options",
+              style: {
+                display: "none",
+                gridTemplateColumns: "1fr 1fr",
+                gap: "10px",
+                width: "100%",
+              },
+              children: [
+                el("label", { textContent: "Cookies (Netscape format)", style: { fontSize: "0.8rem", color: "#666" } }),
+                el("label", { textContent: "Cookies file path", style: { fontSize: "0.8rem", color: "#666" } }),
+                el("textarea", {
+                  id: "dl-cookies",
+                  placeholder: "Paste cookies string...",
+                  style: {
+                    padding: "10px",
+                    border: "1px solid #ddd",
+                    borderRadius: "8px",
+                    fontSize: "0.85rem",
+                    fontFamily: "monospace",
+                    resize: "vertical",
+                    minHeight: "70px",
+                  },
+                }),
+                el("input", {
+                  id: "dl-cookies-file",
+                  type: "text",
+                  placeholder: "/path/to/cookies.txt",
+                  style: {
+                    padding: "10px",
+                    border: "1px solid #ddd",
+                    borderRadius: "8px",
+                    fontSize: "0.85rem",
+                  },
+                }),
+                el("label", { textContent: "Proxy", style: { fontSize: "0.8rem", color: "#666" } }),
+                el("label", { textContent: "User-Agent", style: { fontSize: "0.8rem", color: "#666" } }),
+                el("input", {
+                  id: "dl-proxy",
+                  type: "text",
+                  placeholder: "http://proxy:port",
+                  style: {
+                    padding: "10px",
+                    border: "1px solid #ddd",
+                    borderRadius: "8px",
+                    fontSize: "0.85rem",
+                  },
+                }),
+                el("input", {
+                  id: "dl-user-agent",
+                  type: "text",
+                  placeholder: "Mozilla/5.0 ...",
+                  style: {
+                    padding: "10px",
+                    border: "1px solid #ddd",
+                    borderRadius: "8px",
+                    fontSize: "0.85rem",
+                  },
+                }),
+                el("label", { textContent: "Referer", style: { fontSize: "0.8rem", color: "#666" } }),
+                el("label", { textContent: "Max filesize (MB)", style: { fontSize: "0.8rem", color: "#666" } }),
+                el("input", {
+                  id: "dl-referer",
+                  type: "text",
+                  placeholder: "https://example.com",
+                  style: {
+                    padding: "10px",
+                    border: "1px solid #ddd",
+                    borderRadius: "8px",
+                    fontSize: "0.85rem",
+                  },
+                }),
+                el("input", {
+                  id: "dl-max-filesize",
+                  type: "number",
+                  placeholder: "e.g. 100",
+                  style: {
+                    padding: "10px",
+                    border: "1px solid #ddd",
+                    borderRadius: "8px",
+                    fontSize: "0.85rem",
+                  },
+                }),
+                el("label", { textContent: "Skip download (info only)", style: { fontSize: "0.8rem", color: "#666", gridColumn: "span 2" } }),
+                el("div", {
+                  style: { gridColumn: "span 2", display: "flex", alignItems: "center", gap: "8px" },
+                  children: [
+                    el("input", {
+                      id: "dl-skip-download",
+                      type: "checkbox",
+                      style: { width: "18px", height: "18px" },
+                    }),
+                    el("span", { textContent: "Extract info only without downloading the file" }),
+                  ],
+                }),
+              ],
             }),
           ],
         }),
@@ -1502,6 +1635,13 @@ function renderDownloadCard(job: DownloadJob): HTMLElement {
                 url: job.url,
                 source: job.source,
                 priority: job.priority,
+                cookies: job.cookies || undefined,
+                cookies_file: job.cookies_file || undefined,
+                proxy: job.proxy || undefined,
+                user_agent: job.user_agent || undefined,
+                referer: job.referer || undefined,
+                max_filesize: job.max_filesize || undefined,
+                skip_download: job.skip_download || false,
               });
             } catch (err: any) {
               showAlert(err.message || "Failed to retry");
