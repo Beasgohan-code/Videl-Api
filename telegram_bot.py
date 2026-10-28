@@ -22,6 +22,7 @@ import os
 import time
 import uuid
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Optional
 
 from aiogram import Bot
@@ -91,7 +92,7 @@ async def get_bot() -> Optional[Bot]:
 # User / tier / key storage helpers (JSON fallback)
 # ---------------------------------------------------------------------------
 
-USERS_FILE = os.path.join(os.path.dirname(KEYS_FILE), "users.json") if KEYS_FILE else "users.json"
+USERS_FILE = Path(os.path.join(os.path.dirname(str(KEYS_FILE)), "users.json")) if KEYS_FILE else Path("users.json")
 
 
 def _load_users() -> list[dict]:
