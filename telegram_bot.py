@@ -1279,6 +1279,9 @@ async def start_bot_polling() -> None:
         _polling_active = False
         return
 
+    # Small startup delay to let any previous process release Telegram's getUpdates
+    await asyncio.sleep(3)
+
     # Clear any existing webhook so polling can work without conflicts
     try:
         await bot.delete_webhook(drop_pending_updates=True)
@@ -1286,21 +1289,14 @@ async def start_bot_polling() -> None:
     except Exception as exc:
         logger.warning(f"Could not clear webhook before polling: {exc}")
 
-    # Notify owner that bot started
-    await _send_owner_message(
-        bot,
-        "🚀 <b>Videl-Api Bot Started</b>\n"
-        f"<b>Mode:</b> Polling\n"
-        f"<b>Owner ID:</b> <code>{settings.telegram_bot_owner_id}</code>\n"
-        f"<b>Token set:</b> Yes",
-    )
-
     offset = 0
     logger.info("Telegram bot polling started")
+    conflict_backoff = 30
     try:
         while True:
             try:
                 updates = await bot.get_updates(offset=offset, timeout=30, limit=100)
+                conflict_backoff = 30  # reset on success
                 for upd in updates:
                     offset = upd.update_id + 1
                     await process_update(upd.model_dump())
@@ -1309,23 +1305,17 @@ async def start_bot_polling() -> None:
                 if "Conflict" in msg or "terminated by other getUpdates" in msg:
                     logger.warning(
                         "Telegram polling conflict: another bot instance is running. "
-                        "Backing off 30s. Use webhook mode or disable polling.",
+                        f"Backing off {conflict_backoff}s.",
                     )
-                    await _send_owner_log(
-                        bot,
-                        "WARNING",
-                        "Telegram polling conflict - another bot instance is running",
-                        exc=exc,
-                    )
-                    await asyncio.sleep(30)
+                    # Try to clear webhook again in case a stale instance set one
+                    try:
+                        await bot.delete_webhook(drop_pending_updates=True)
+                    except Exception:
+                        pass
+                    await asyncio.sleep(conflict_backoff)
+                    conflict_backoff = min(conflict_backoff * 2, 300)
                 else:
                     logger.error(f"Polling error: {exc}")
-                    await _send_owner_log(
-                        bot,
-                        "ERROR",
-                        "Polling loop error",
-                        exc=exc,
-                    )
                     await asyncio.sleep(5)
     finally:
         _polling_active = False
