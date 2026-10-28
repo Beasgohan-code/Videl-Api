@@ -324,7 +324,7 @@ def build_tier_message(tier: str, is_admin: bool = False) -> str:
         f"📊 Daily requests: {daily_str}\n"
         f"📊 Monthly requests: {monthly_str}\n"
         f"📊 Daily bytes: {limits['daily_bytes'] / (1024*1024):.0f} MB\n"
-        f"📊 Monthly bytes: {limits['monthly_bytes'] / (1024*1024 / 1024):.0f} GB\n"
+        f"📊 Monthly bytes: {limits['monthly_bytes'] / (1024*1024*1024):.0f} GB\n"
         f"⚡ Rate limit: {rate_str} req/min\n"
         f"🔑 Scopes: {', '.join(limits['scopes'])}\n\n"
         f"Upgrade to Pro with /buy or contact admin for Owner access."
@@ -872,6 +872,54 @@ async def handle_broadcast(bot: Bot, chat_id: int | str, user: dict, text: Optio
     await _send_message(bot, chat_id, f"✅ Broadcast sent: {sent} success, {failed} failed.")
 
 
+async def handle_users(bot: Bot, chat_id: int | str, user: dict) -> None:
+    """List all registered users (owner/admin only)."""
+    if not (user.get("is_admin") or user.get("is_owner")):
+        await _send_message(bot, chat_id, "❌ Owner access required.")
+        return
+    users = _load_users()
+    if not users:
+        await _send_message(bot, chat_id, "👥 No users registered.")
+        return
+    total = len(users)
+    owners = sum(1 for u in users if u.get("is_owner"))
+    admins = sum(1 for u in users if u.get("is_admin") and not u.get("is_owner"))
+    free = sum(1 for u in users if not u.get("is_admin") and not u.get("is_owner"))
+    lines = [f"👥 <b>Users</b>\nTotal: {total} | Owner: {owners} | Admin: {admins} | Free: {free}\n"]
+    for u in users[:10]:
+        name = u.get("first_name") or u.get("username") or f"tg:{u.get('telegram_id')}"
+        tier = u.get("tier", "free")
+        lines.append(f"• {name} — <b>{tier}</b> (tg_id: <code>{u.get('telegram_id')}</code>)")
+    if len(users) > 10:
+        lines.append(f"... and {len(users) - 10} more.")
+    await _send_message(bot, chat_id, "\n".join(lines))
+
+
+async def handle_stats(bot: Bot, chat_id: int | str, user: dict) -> None:
+    """Show bot statistics (owner/admin only)."""
+    if not (user.get("is_admin") or user.get("is_owner")):
+        await _send_message(bot, chat_id, "❌ Owner access required.")
+        return
+    users = _load_users()
+    keys = _load_json(KEYS_FILE, [])
+    total_users = len(users)
+    total_keys = len(keys)
+    active_keys = sum(1 for k in keys if k.get("active", True))
+    total_downloads = sum(u.get("download_count", 0) for u in users)
+    total_searches = sum(u.get("search_count", 0) for u in users)
+    total_bytes = sum(u.get("monthly_bytes", 0) for u in users)
+    gb = total_bytes / (1024 * 1024 * 1024)
+    lines = [
+        "📊 <b>Bot Statistics</b>\n",
+        f"👥 Total users: {total_users}",
+        f"🔑 Total API keys: {total_keys} (active: {active_keys})",
+        f"⬇️ Total downloads: {total_downloads}",
+        f"🔍 Total searches: {total_searches}",
+        f"📦 Total bytes downloaded: {gb:.2f} GB",
+    ]
+    await _send_message(bot, chat_id, "\n".join(lines))
+
+
 # ---------------------------------------------------------------------------
 # Inline query handler (search from anywhere)
 # ---------------------------------------------------------------------------
@@ -942,6 +990,27 @@ async def process_update(update: dict) -> None:
             command = text.split(" ")[0] if text else ""
             args = text[len(command):].strip() if text else ""
 
+            # --- Successful payment (must be checked before command routing) ---
+            if msg.get("successful_payment"):
+                payment = msg["successful_payment"]
+                amount = payment.get("total_amount", 0)
+                currency = payment.get("currency", "XTR")
+                user = _get_or_create_user(tg_id, username, first_name)
+                _set_user_field(tg_id, "tier", "pro")
+                _set_user_field(tg_id, "stars_balance", user.get("stars_balance", 0) + amount)
+                _set_user_field(tg_id, "lifetime_stars", user.get("lifetime_stars", 0) + amount)
+                _set_user_field(tg_id, "scopes", ["read", "search", "download"])
+                await _send_message(
+                    bot,
+                    chat_id,
+                    "🎉 <b>Payment Successful!</b>\n\n"
+                    f"Amount: {amount} {currency}\n"
+                    "Tier upgraded to: <b>PRO</b>\n\n"
+                    "Your API keys now have Pro limits.\n"
+                    "Use /key to view your keys.",
+                )
+                return
+
             user = _get_or_create_user(tg_id, username, first_name)
 
             if command == "/start":
@@ -991,14 +1060,10 @@ async def process_update(update: dict) -> None:
                 await _safe("handle_admin", handle_admin(bot, chat_id, user))
             elif command == "/broadcast":
                 await _safe("handle_broadcast", handle_broadcast(bot, chat_id, user, args or None))
-            elif command in ("/download", "/info", "/lyrics"):
-                if not args:
-                    await _send_message(
-                        bot,
-                        chat_id,
-                        f"🔧 {command} — send a URL or search query.",
-                        reply_markup=_keyboard([[_cb_button("⬅️ Menu", "cb:menu")]]),
-                    )
+            elif command == "/users":
+                await _safe("handle_users", handle_users(bot, chat_id, user))
+            elif command == "/stats":
+                await _safe("handle_stats", handle_stats(bot, chat_id, user))
             else:
                 await _safe("handle_start", handle_start(bot, chat_id, user))
 
@@ -1126,43 +1191,6 @@ async def process_update(update: dict) -> None:
         elif "pre_checkout_query" in update:
             pcq = update["pre_checkout_query"]
             await _answer_pre_checkout_query(bot, pcq["id"], ok=True)
-
-        # --- Successful payment ---
-        elif "message" in update and update["message"].get("successful_payment"):
-            msg = update["message"]
-            chat = msg.get("chat")
-            if not chat:
-                logger.warning("Received payment update without chat field")
-                return
-            chat_id = chat["id"]
-            from_user = msg.get("from", {})
-            if not from_user:
-                logger.warning("Received payment update without from field")
-                return
-            tg_id = from_user.get("id")
-            if not tg_id:
-                logger.warning("Received payment update without user ID")
-                return
-            payment = msg["successful_payment"]
-            amount = payment.get("total_amount", 0)
-            currency = payment.get("currency", "XTR")
-            payload_str = payment.get("invoice_payload", "")
-
-            user = _get_or_create_user(tg_id)
-            _set_user_field(tg_id, "tier", "pro")
-            _set_user_field(tg_id, "stars_balance", user.get("stars_balance", 0) + amount)
-            _set_user_field(tg_id, "lifetime_stars", user.get("lifetime_stars", 0) + amount)
-            _set_user_field(tg_id, "scopes", ["read", "search", "download"])
-
-            await _send_message(
-                bot,
-                chat_id,
-                f"🎉 <b>Payment Successful!</b>\n\n"
-                f"Amount: {amount} {currency}\n"
-                f"Tier upgraded to: <b>PRO</b>\n\n"
-                f"Your API keys now have Pro limits.\n"
-                f"Use /key to view your keys.",
-            )
 
         # --- Chat member (bot added to group) ---
         elif "my_chat_member" in update:
