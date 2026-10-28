@@ -69,6 +69,7 @@ logger = logging.getLogger("videl.telegram_bot")
 _bot: Optional[Bot] = None
 _bot_lock = asyncio.Lock()
 _bot_initialized = False
+_polling_active = False
 
 
 async def get_bot() -> Optional[Bot]:
@@ -1268,8 +1269,14 @@ async def set_bot_commands() -> None:
 
 async def start_bot_polling() -> None:
     """Long-polling entry point (for standalone bot mode)."""
+    global _polling_active
+    if _polling_active:
+        logger.warning("Telegram polling already active; not starting duplicate loop")
+        return
+    _polling_active = True
     bot = await get_bot()
     if not bot:
+        _polling_active = False
         return
 
     # Clear any existing webhook so polling can work without conflicts
@@ -1290,32 +1297,36 @@ async def start_bot_polling() -> None:
 
     offset = 0
     logger.info("Telegram bot polling started")
-    while True:
-        try:
-            updates = await bot.get_updates(offset=offset, timeout=30, limit=100)
-            for upd in updates:
-                offset = upd.update_id + 1
-                await process_update(upd.model_dump())
-        except Exception as exc:
-            msg = str(exc)
-            if "Conflict" in msg or "terminated by other getUpdates" in msg:
-                logger.warning(
-                    "Telegram polling conflict: another bot instance is running. "
-                    "Backing off 30s. Use webhook mode or disable polling.",
-                )
-                await _send_owner_log(
-                    bot,
-                    "WARNING",
-                    "Telegram polling conflict - another bot instance is running",
-                    exc=exc,
-                )
-                await asyncio.sleep(30)
-            else:
-                logger.error(f"Polling error: {exc}")
-                await _send_owner_log(
-                    bot,
-                    "ERROR",
-                    "Polling loop error",
-                    exc=exc,
-                )
-                await asyncio.sleep(5)
+    try:
+        while True:
+            try:
+                updates = await bot.get_updates(offset=offset, timeout=30, limit=100)
+                for upd in updates:
+                    offset = upd.update_id + 1
+                    await process_update(upd.model_dump())
+            except Exception as exc:
+                msg = str(exc)
+                if "Conflict" in msg or "terminated by other getUpdates" in msg:
+                    logger.warning(
+                        "Telegram polling conflict: another bot instance is running. "
+                        "Backing off 30s. Use webhook mode or disable polling.",
+                    )
+                    await _send_owner_log(
+                        bot,
+                        "WARNING",
+                        "Telegram polling conflict - another bot instance is running",
+                        exc=exc,
+                    )
+                    await asyncio.sleep(30)
+                else:
+                    logger.error(f"Polling error: {exc}")
+                    await _send_owner_log(
+                        bot,
+                        "ERROR",
+                        "Polling loop error",
+                        exc=exc,
+                    )
+                    await asyncio.sleep(5)
+    finally:
+        _polling_active = False
+        logger.info("Telegram bot polling stopped")
