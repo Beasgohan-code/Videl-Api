@@ -326,10 +326,14 @@ async def lifespan(app: FastAPI):
             await set_bot_commands()
             if settings.telegram_bot_webhook_url:
                 await set_webhook(settings.telegram_bot_webhook_url)
+                logger.info("Telegram bot initialized (webhook mode)")
             elif settings.telegram_bot_polling:
                 asyncio.create_task(start_bot_polling())
+                logger.info("Telegram bot initialized (polling mode)")
             else:
-                logger.info("Telegram bot initialized (polling disabled - use webhook mode)")
+                # Default to polling when token is set but no delivery method configured
+                asyncio.create_task(start_bot_polling())
+                logger.info("Telegram bot initialized (auto polling mode)")
 
     logger.info("Videl-Api v3.2.0 startup complete")
 
