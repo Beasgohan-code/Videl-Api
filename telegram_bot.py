@@ -571,6 +571,7 @@ async def handle_download_url(bot: Bot, chat_id: int | str, user: dict, url: str
             job_id=uuid.uuid4().hex,
             url=url,
             source="youtube",
+            user_id=user["telegram_id"],
         )
         await dl_enqueue_download(job)
         await _send_message(
@@ -644,7 +645,7 @@ async def handle_keys(bot: Bot, chat_id: int | str, user: dict) -> None:
     except Exception as exc:
         await _send_message(bot, chat_id, f"❌ Failed to list keys: {exc}")
         return
-    key_list = keys.get("keys", []) if isinstance(keys, dict) else []
+    key_list = keys if isinstance(keys, list) else []
 
     if not key_list:
         text = "🔑 <b>API Keys</b>\n\nYou don't have any API keys yet.\nCreate one to access the API."
@@ -952,7 +953,14 @@ async def process_update(update: dict) -> None:
             elif command == "/search":
                 await _safe("handle_search", handle_search(bot, chat_id, user, args or None))
             elif command == "/download":
-                await _safe("handle_download_url", handle_download_url(bot, chat_id, user, args or ""))
+                if not args:
+                    await _send_message(
+                        bot, chat_id,
+                        "📥 <b>Download</b>\n\nSend me a URL to download.\nExample: /download https://youtu.be/...",
+                        reply_markup=_keyboard([[_cb_button("⬅️ Back", "cb:menu")]]),
+                    )
+                else:
+                    await _safe("handle_download_url", handle_download_url(bot, chat_id, user, args))
             elif command == "/info":
                 await _safe("handle_info", handle_info(bot, chat_id, user, args or None))
             elif command == "/lyrics":
@@ -1033,6 +1041,22 @@ async def process_update(update: dict) -> None:
                 await _safe("handle_keys", handle_keys(bot, chat_id, user))
             elif data == "cb:key:create":
                 await _safe("handle_create_key", handle_create_key(bot, chat_id, user))
+            elif data == "cb:key:list":
+                await _safe("handle_keys", handle_keys(bot, chat_id, user))
+            elif data == "cb:key:revoke":
+                # List keys first so user can see what to revoke
+                await _safe("handle_keys", handle_keys(bot, chat_id, user))
+                await _send_message(
+                    bot, chat_id,
+                    "🗑️ <b>Revoke Key</b>\n\nUse the API to revoke a key:\nDELETE /v1/keys/{key_id}\nOr contact support.",
+                    reply_markup=keys_keyboard(),
+                )
+            elif data == "cb:key:rotate":
+                await _send_message(
+                    bot, chat_id,
+                    "🔄 <b>Rotate Key</b>\n\nUse the API to rotate a key:\nPATCH /v1/keys/{key_id}?action=rotate\nOr contact support.",
+                    reply_markup=keys_keyboard(),
+                )
             elif data == "cb:buy":
                 await _safe("handle_buy", handle_buy(bot, chat_id, user))
             elif data == "cb:search":
@@ -1106,8 +1130,19 @@ async def process_update(update: dict) -> None:
         # --- Successful payment ---
         elif "message" in update and update["message"].get("successful_payment"):
             msg = update["message"]
-            chat_id = msg["chat"]["id"]
-            tg_id = msg["from"]["id"]
+            chat = msg.get("chat")
+            if not chat:
+                logger.warning("Received payment update without chat field")
+                return
+            chat_id = chat["id"]
+            from_user = msg.get("from", {})
+            if not from_user:
+                logger.warning("Received payment update without from field")
+                return
+            tg_id = from_user.get("id")
+            if not tg_id:
+                logger.warning("Received payment update without user ID")
+                return
             payment = msg["successful_payment"]
             amount = payment.get("total_amount", 0)
             currency = payment.get("currency", "XTR")

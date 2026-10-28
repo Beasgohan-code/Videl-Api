@@ -34,12 +34,13 @@ from config import settings
 
 class DownloadJob:
     __slots__ = ("job_id", "url", "source", "status", "progress", "file_path",
-                 "error", "created_at", "updated_at", "cancelled")
+                 "error", "created_at", "updated_at", "cancelled", "user_id")
 
-    def __init__(self, job_id: str, url: str, source: Optional[str]):
+    def __init__(self, job_id: str, url: str, source: Optional[str], user_id: Optional[int] = 0):
         self.job_id = job_id
         self.url = url
         self.source = source
+        self.user_id = user_id
         self.status = "queued"  # queued | downloading | completed | failed | cancelled | paused
         self.progress = 0.0
         self.file_path: Optional[str] = None
@@ -53,6 +54,7 @@ class DownloadJob:
             "job_id": self.job_id,
             "url": self.url,
             "source": self.source,
+            "user_id": self.user_id,
             "status": self.status,
             "progress": round(self.progress, 2),
             "file_path": self.file_path,
