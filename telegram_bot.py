@@ -919,7 +919,11 @@ async def process_update(update: dict) -> None:
         # --- Message ---
         if "message" in update:
             msg = update["message"]
-            chat_id = msg["chat"]["id"]
+            chat = msg.get("chat")
+            if not chat:
+                logger.warning("Received message without chat field")
+                return
+            chat_id = chat["id"]
             from_user = msg.get("from", {})
             tg_id = from_user.get("id")
             username = from_user.get("username", "")
@@ -986,8 +990,13 @@ async def process_update(update: dict) -> None:
             cb = update["callback_query"]
             cb_id = cb["id"]
             data = cb.get("data", "")
-            chat_id = cb["message"]["chat"]["id"]
-            message_id = cb["message"]["message_id"]
+            cb_message = cb.get("message")
+            if not cb_message:
+                logger.warning("Received callback_query without message field")
+                await _answer_callback_query(bot, cb_id)
+                return
+            chat_id = cb_message["chat"]["id"]
+            message_id = cb_message["message_id"]
             from_user = cb.get("from", {})
             tg_id = from_user.get("id")
             user = _get_or_create_user(tg_id, from_user.get("username", ""), from_user.get("first_name", ""))
