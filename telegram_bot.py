@@ -11,6 +11,8 @@ Full-featured Telegram Bot with:
 - Broadcast, stats, admin panel
 - Settings, language, notifications
 - Webhook integration with the FastAPI backend
+
+Built on aiogram 3.x.
 """
 
 from __future__ import annotations
@@ -24,7 +26,14 @@ import uuid
 from datetime import datetime, timezone
 from typing import Any, Optional
 
-import aiohttp
+from aiogram import Bot, Dispatcher
+from aiogram.types import (
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    Update,
+)
+from aiogram.enums import ParseMode
+from aiogram.client.default import DefaultBotProperties
 
 from config import settings, list_all_sources, MUSIC_SOURCES
 from downloader import (
@@ -53,239 +62,17 @@ from auth import (
 logger = logging.getLogger("videl.telegram_bot")
 
 # ---------------------------------------------------------------------------
-# Telegram Bot API client (raw HTTP - no external wrapper needed)
+# Bot instance (lazy init) - aiogram
 # ---------------------------------------------------------------------------
 
-class TelegramBot:
-    """Raw Telegram Bot API client using aiohttp."""
-
-    def __init__(self, token: str):
-        self.token = token
-        self.base = f"https://api.telegram.org/bot{token}"
-        self._session: Optional[aiohttp.ClientSession] = None
-
-    async def _session_get(self) -> aiohttp.ClientSession:
-        if self._session is None or self._session.closed:
-            self._session = aiohttp.ClientSession()
-        return self._session
-
-    async def _request(self, method: str, payload: dict) -> dict:
-        session = await self._session_get()
-        async with session.post(f"{self.base}/{method}", json=payload, timeout=30) as resp:
-            data = await resp.json()
-            if not data.get("ok"):
-                raise RuntimeError(f"Telegram API error: {data.get('description', 'unknown')}")
-            return data.get("result", {})
-
-    async def close(self):
-        if self._session and not self._session.closed:
-            await self._session.close()
-
-    # --- Send methods ---
-
-    async def send_message(
-        self,
-        chat_id: int | str,
-        text: str,
-        *,
-        parse_mode: str = "HTML",
-        reply_markup: Optional[dict] = None,
-        reply_to_message_id: Optional[int] = None,
-        disable_web_page_preview: bool = True,
-    ) -> dict:
-        payload: dict[str, Any] = {
-            "chat_id": chat_id,
-            "text": text,
-            "parse_mode": parse_mode,
-            "disable_web_page_preview": disable_web_page_preview,
-        }
-        if reply_markup:
-            payload["reply_markup"] = reply_markup
-        if reply_to_message_id:
-            payload["reply_to_message_id"] = reply_to_message_id
-        return await self._request("sendMessage", payload)
-
-    async def send_photo(
-        self,
-        chat_id: int | str,
-        photo: str,
-        *,
-        caption: Optional[str] = None,
-        parse_mode: str = "HTML",
-        reply_markup: Optional[dict] = None,
-    ) -> dict:
-        payload: dict[str, Any] = {"chat_id": chat_id, "photo": photo}
-        if caption:
-            payload["caption"] = caption
-            payload["parse_mode"] = parse_mode
-        if reply_markup:
-            payload["reply_markup"] = reply_markup
-        return await self._request("sendPhoto", payload)
-
-    async def send_audio(
-        self,
-        chat_id: int | str,
-        audio: str,
-        *,
-        caption: Optional[str] = None,
-        title: Optional[str] = None,
-        performer: Optional[str] = None,
-        duration: Optional[int] = None,
-        parse_mode: str = "HTML",
-        reply_markup: Optional[dict] = None,
-    ) -> dict:
-        payload: dict[str, Any] = {"chat_id": chat_id, "audio": audio}
-        if caption:
-            payload["caption"] = caption
-            payload["parse_mode"] = parse_mode
-        if title:
-            payload["title"] = title
-        if performer:
-            payload["performer"] = performer
-        if duration:
-            payload["duration"] = duration
-        if reply_markup:
-            payload["reply_markup"] = reply_markup
-        return await self._request("sendAudio", payload)
-
-    async def send_document(
-        self,
-        chat_id: int | str,
-        document: str,
-        *,
-        caption: Optional[str] = None,
-        parse_mode: str = "HTML",
-        reply_markup: Optional[dict] = None,
-    ) -> dict:
-        payload: dict[str, Any] = {"chat_id": chat_id, "document": document}
-        if caption:
-            payload["caption"] = caption
-            payload["parse_mode"] = parse_mode
-        if reply_markup:
-            payload["reply_markup"] = reply_markup
-        return await self._request("sendDocument", payload)
-
-    async def send_invoice(
-        self,
-        chat_id: int | str,
-        title: str,
-        description: str,
-        payload_str: str,
-        currency: str = "XTR",
-        prices: list[dict] | None = None,
-        provider_token: str = "",
-        max_tip_amount: Optional[int] = None,
-        suggested_tip_amounts: list[int] | None = None,
-        start_parameter: str = "stars",
-        reply_markup: Optional[dict] = None,
-    ) -> dict:
-        payload: dict[str, Any] = {
-            "chat_id": chat_id,
-            "title": title,
-            "description": description,
-            "payload": payload_str,
-            "currency": currency,
-            "prices": prices or [{"label": "Pro Tier", "amount": 100}],
-            "provider_token": provider_token,
-            "start_parameter": start_parameter,
-        }
-        if max_tip_amount is not None:
-            payload["max_tip_amount"] = max_tip_amount
-        if suggested_tip_amounts:
-            payload["suggested_tip_amounts"] = suggested_tip_amounts
-        if reply_markup:
-            payload["reply_markup"] = reply_markup
-        return await self._request("sendInvoice", payload)
-
-    async def answer_pre_checkout_query(
-        self,
-        pre_checkout_query_id: str,
-        ok: bool,
-        error_message: Optional[str] = None,
-    ) -> dict:
-        payload: dict[str, Any] = {
-            "pre_checkout_query_id": pre_checkout_query_id,
-            "ok": ok,
-        }
-        if error_message:
-            payload["error_message"] = error_message
-        return await self._request("answerPreCheckoutQuery", payload)
-
-    async def answer_inline_query(
-        self,
-        inline_query_id: str,
-        results: list[dict],
-        *,
-        cache_time: int = 300,
-        is_personal: bool = True,
-    ) -> dict:
-        return await self._request(
-            "answerInlineQuery",
-            {
-                "inline_query_id": inline_query_id,
-                "results": results,
-                "cache_time": cache_time,
-                "is_personal": is_personal,
-            },
-        )
-
-    async def answer_callback_query(
-        self,
-        callback_query_id: str,
-        *,
-        text: Optional[str] = None,
-        show_alert: bool = False,
-        url: Optional[str] = None,
-        cache_time: Optional[int] = None,
-    ) -> dict:
-        payload: dict[str, Any] = {"callback_query_id": callback_query_id}
-        if text is not None:
-            payload["text"] = text
-            payload["show_alert"] = show_alert
-        if url:
-            payload["url"] = url
-        if cache_time is not None:
-            payload["cache_time"] = cache_time
-        return await self._request("answerCallbackQuery", payload)
-
-    async def set_my_commands(self, commands: list[dict]) -> dict:
-        return await self._request("setMyCommands", {"commands": commands})
-
-    async def get_chat_member(self, chat_id: int | str, user_id: int) -> dict:
-        return await self._request(
-            "getChatMember", {"chat_id": chat_id, "user_id": user_id}
-        )
-
-    async def send_chat_action(self, chat_id: int | str, action: str) -> dict:
-        return await self._request("sendChatAction", {"chat_id": chat_id, "action": action})
-
-    # --- Inline keyboard helpers ---
-
-    @staticmethod
-    def keyboard(buttons: list[list[dict]]) -> dict:
-        """Build an inline keyboard markup."""
-        return {"inline_keyboard": [[b for b in row] for row in buttons]}
-
-    @staticmethod
-    def cb_button(text: str, callback_data: str) -> dict:
-        return {"text": text, "callback_data": callback_data}
-
-    @staticmethod
-    def url_button(text: str, url: str) -> dict:
-        return {"text": text, "url": url}
-
-
-# ---------------------------------------------------------------------------
-# Bot instance (lazy init)
-# ---------------------------------------------------------------------------
-
-_bot: Optional[TelegramBot] = None
+_bot: Optional[Bot] = None
+_dp: Optional[Dispatcher] = None
 _bot_lock = asyncio.Lock()
 _bot_initialized = False
 
 
-async def get_bot() -> Optional[TelegramBot]:
-    global _bot, _bot_initialized
+async def get_bot() -> Optional[Bot]:
+    global _bot, _dp, _bot_initialized
     async with _bot_lock:
         if _bot_initialized:
             return _bot
@@ -294,7 +81,11 @@ async def get_bot() -> Optional[TelegramBot]:
             logger.warning("TELEGRAM_BOT_TOKEN not set; bot disabled")
             _bot_initialized = True
             return None
-        _bot = TelegramBot(token)
+        _bot = Bot(
+            token=token,
+            default=DefaultBotProperties(parse_mode=ParseMode.HTML),
+        )
+        _dp = Dispatcher()
         _bot_initialized = True
         return _bot
 
@@ -400,6 +191,68 @@ TIER_LIMITS = {
 
 
 # ---------------------------------------------------------------------------
+# Inline keyboard builders (aiogram types)
+# ---------------------------------------------------------------------------
+
+def _cb_button(text: str, callback_data: str) -> InlineKeyboardButton:
+    return InlineKeyboardButton(text=text, callback_data=callback_data)
+
+
+def _url_button(text: str, url: str) -> InlineKeyboardButton:
+    return InlineKeyboardButton(text=text, url=url)
+
+
+def _keyboard(rows: list[list[InlineKeyboardButton]]) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def main_menu_keyboard(is_admin: bool = False) -> InlineKeyboardMarkup:
+    rows = [
+        [_cb_button("🔍 Search", "cb:search"), _cb_button("📥 Download", "cb:download")],
+        [_cb_button("🎵 Info", "cb:info"), _cb_button("📝 Lyrics", "cb:lyrics")],
+        [_cb_button("🔑 API Keys", "cb:keys"), _cb_button("💎 Tier", "cb:tier")],
+        [_cb_button("💳 Buy Pro", "cb:buy"), _cb_button("📋 Playlist", "cb:playlist")],
+        [_cb_button("📊 Stats", "cb:stats"), _cb_button("⚙️ Settings", "cb:settings")],
+        [_cb_button("📡 Sources", "cb:sources"), _cb_button("📢 Status", "cb:status")],
+    ]
+    if is_admin:
+        rows.append([_cb_button("👑 Admin Panel", "cb:admin")])
+    rows.append([_cb_button("❓ Help", "cb:help")])
+    return _keyboard(rows)
+
+
+def tier_keyboard() -> InlineKeyboardMarkup:
+    return _keyboard([
+        [_cb_button("🆓 Free", "cb:tier:free"), _cb_button("💎 Pro (100 Stars)", "cb:tier:pro")],
+        [_cb_button("👑 Owner (Contact Admin)", "cb:tier:owner")],
+        [_cb_button("⬅️ Back", "cb:menu")],
+    ])
+
+
+def keys_keyboard() -> InlineKeyboardMarkup:
+    return _keyboard([
+        [_cb_button("➕ Create Key", "cb:key:create"), _cb_button("📋 List Keys", "cb:key:list")],
+        [_cb_button("🔄 Rotate Key", "cb:key:rotate"), _cb_button("❌ Revoke Key", "cb:key:revoke")],
+        [_cb_button("⬅️ Back", "cb:menu")],
+    ])
+
+
+def admin_keyboard() -> InlineKeyboardMarkup:
+    return _keyboard([
+        [_cb_button("👥 Users", "cb:admin:users"), _cb_button("📊 Stats", "cb:admin:stats")],
+        [_cb_button("📢 Broadcast", "cb:admin:broadcast"), _cb_button("🔑 All Keys", "cb:admin:keys")],
+        [_cb_button("⚙️ System", "cb:admin:system"), _cb_button("⬅️ Back", "cb:menu")],
+    ])
+
+
+def settings_keyboard() -> InlineKeyboardMarkup:
+    return _keyboard([
+        [_cb_button("🌐 Language", "cb:settings:lang"), _cb_button("𔔨 Notifications", "cb:settings:notify")],
+        [_cb_button("⬅️ Back", "cb:menu")],
+    ])
+
+
+# ---------------------------------------------------------------------------
 # Rich message builders
 # ---------------------------------------------------------------------------
 
@@ -423,18 +276,18 @@ def build_welcome_message(first_name: str, is_admin: bool = False) -> str:
 
 def build_help_message(is_admin: bool = False) -> str:
     cmds = [
-        ("/start", "Welcome &amp; main menu"),
+        ("/start", "Welcome & main menu"),
         ("/help", "Show this help message"),
-        ("/search", "Search music &amp; media"),
+        ("/search", "Search music & media"),
         ("/download", "Download a track by URL"),
         ("/info", "Get track/album info"),
         ("/lyrics", "Get lyrics for a track"),
         ("/key", "Manage your API keys"),
-        ("/tier", "View &amp; change subscription tier"),
+        ("/tier", "View & change subscription tier"),
         ("/buy", "Buy Pro tier with Telegram Stars"),
         ("/playlist", "Manage your playlists"),
         ("/history", "View download history"),
-        ("/settings", "User settings &amp; language"),
+        ("/settings", "User settings & language"),
         ("/notify", "Notification preferences"),
         ("/source", "List supported sources"),
         ("/status", "System status"),
@@ -471,115 +324,156 @@ def build_tier_message(tier: str, is_admin: bool = False) -> str:
 
 
 # ---------------------------------------------------------------------------
-# Inline keyboard builders
+# Helper to send messages via aiogram Bot
 # ---------------------------------------------------------------------------
 
-def main_menu_keyboard(is_admin: bool = False) -> dict:
-    rows = [
-        [TelegramBot.cb_button("🔍 Search", "cb:search"), TelegramBot.cb_button("📥 Download", "cb:download")],
-        [TelegramBot.cb_button("🎵 Info", "cb:info"), TelegramBot.cb_button("📝 Lyrics", "cb:lyrics")],
-        [TelegramBot.cb_button("🔑 API Keys", "cb:keys"), TelegramBot.cb_button("💎 Tier", "cb:tier")],
-        [TelegramBot.cb_button("💳 Buy Pro", "cb:buy"), TelegramBot.cb_button("📋 Playlist", "cb:playlist")],
-        [TelegramBot.cb_button("📊 Stats", "cb:stats"), TelegramBot.cb_button("⚙️ Settings", "cb:settings")],
-        [TelegramBot.cb_button("📡 Sources", "cb:sources"), TelegramBot.cb_button("📢 Status", "cb:status")],
-    ]
-    if is_admin:
-        rows.append([TelegramBot.cb_button("👑 Admin Panel", "cb:admin")])
-    rows.append([TelegramBot.cb_button("❓ Help", "cb:help")])
-    return TelegramBot.keyboard(rows)
+async def _send_message(
+    bot: Bot,
+    chat_id: int | str,
+    text: str,
+    *,
+    reply_markup: Optional[InlineKeyboardMarkup] = None,
+    reply_to_message_id: Optional[int] = None,
+    disable_web_page_preview: bool = True,
+) -> None:
+    await bot.send_message(
+        chat_id=chat_id,
+        text=text,
+        reply_markup=reply_markup,
+        reply_to_message_id=reply_to_message_id,
+        disable_web_page_preview=disable_web_page_preview,
+    )
 
 
-def tier_keyboard() -> dict:
-    return TelegramBot.keyboard([
-        [TelegramBot.cb_button("🆓 Free", "cb:tier:free"), TelegramBot.cb_button("💎 Pro (100 Stars)", "cb:tier:pro")],
-        [TelegramBot.cb_button("👑 Owner (Contact Admin)", "cb:tier:owner")],
-        [TelegramBot.cb_button("⬅️ Back", "cb:menu")],
-    ])
+async def _send_invoice(
+    bot: Bot,
+    chat_id: int | str,
+    title: str,
+    description: str,
+    payload_str: str,
+    currency: str = "XTR",
+    prices: list[dict] | None = None,
+    provider_token: str = "",
+    max_tip_amount: Optional[int] = None,
+    suggested_tip_amounts: list[int] | None = None,
+    start_parameter: str = "stars",
+    reply_markup: Optional[InlineKeyboardMarkup] = None,
+) -> None:
+    await bot.send_invoice(
+        chat_id=chat_id,
+        title=title,
+        description=description,
+        payload=payload_str,
+        currency=currency,
+        prices=prices or [{"label": "Pro Tier", "amount": 100}],
+        provider_token=provider_token,
+        max_tip_amount=max_tip_amount,
+        suggested_tip_amounts=suggested_tip_amounts,
+        start_parameter=start_parameter,
+        reply_markup=reply_markup,
+    )
 
 
-def keys_keyboard() -> dict:
-    return TelegramBot.keyboard([
-        [TelegramBot.cb_button("➕ Create Key", "cb:key:create"),
-         TelegramBot.cb_button("📋 List Keys", "cb:key:list")],
-        [TelegramBot.cb_button("🔄 Rotate Key", "cb:key:rotate"),
-         TelegramBot.cb_button("❌ Revoke Key", "cb:key:revoke")],
-        [TelegramBot.cb_button("⬅️ Back", "cb:menu")],
-    ])
+async def _answer_callback_query(
+    bot: Bot,
+    callback_query_id: str,
+    *,
+    text: Optional[str] = None,
+    show_alert: bool = False,
+    url: Optional[str] = None,
+    cache_time: Optional[int] = None,
+) -> None:
+    await bot.answer_callback_query(
+        callback_query_id=callback_query_id,
+        text=text,
+        show_alert=show_alert,
+        url=url,
+        cache_time=cache_time,
+    )
 
 
-def admin_keyboard() -> dict:
-    return TelegramBot.keyboard([
-        [TelegramBot.cb_button("👥 Users", "cb:admin:users"),
-         TelegramBot.cb_button("📊 Stats", "cb:admin:stats")],
-        [TelegramBot.cb_button("📢 Broadcast", "cb:admin:broadcast"),
-         TelegramBot.cb_button("🔑 All Keys", "cb:admin:keys")],
-        [TelegramBot.cb_button("⚙️ System", "cb:admin:system"),
-         TelegramBot.cb_button("⬅️ Back", "cb:menu")],
-    ])
+async def _answer_inline_query(
+    bot: Bot,
+    inline_query_id: str,
+    results: list[dict],
+    *,
+    cache_time: int = 300,
+    is_personal: bool = True,
+) -> None:
+    await bot.answer_inline_query(
+        inline_query_id=inline_query_id,
+        results=results,
+        cache_time=cache_time,
+        is_personal=is_personal,
+    )
 
 
-def settings_keyboard() -> dict:
-    return TelegramBot.keyboard([
-        [TelegramBot.cb_button("🌐 Language", "cb:settings:lang"),
-         TelegramBot.cb_button("𔔨 Notifications", "cb:settings:notify")],
-        [TelegramBot.cb_button("⬅️ Back", "cb:menu")],
-    ])
+async def _answer_pre_checkout_query(
+    bot: Bot,
+    pre_checkout_query_id: str,
+    ok: bool,
+    error_message: Optional[str] = None,
+) -> None:
+    await bot.answer_pre_checkout_query(
+        pre_checkout_query_id=pre_checkout_query_id,
+        ok=ok,
+        error_message=error_message,
+    )
 
 
 # ---------------------------------------------------------------------------
 # Handler functions
 # ---------------------------------------------------------------------------
 
-async def handle_start(bot: TelegramBot, chat_id: int | str, user: dict, message_id: Optional[int] = None) -> None:
+async def handle_start(bot: Bot, chat_id: int | str, user: dict, message_id: Optional[int] = None) -> None:
     is_admin = user.get("is_admin", False) or user.get("is_owner", False)
     text = build_welcome_message(user.get("first_name", "User"), is_admin)
     kb = main_menu_keyboard(is_admin)
     if message_id:
-        await bot._request("editMessageText", {
-            "chat_id": chat_id,
-            "message_id": message_id,
-            "text": text,
-            "parse_mode": "HTML",
-            "reply_markup": kb,
-        })
+        await bot.edit_message_text(
+            chat_id=chat_id,
+            message_id=message_id,
+            text=text,
+            reply_markup=kb,
+        )
     else:
-        await bot.send_message(chat_id, text, reply_markup=kb)
+        await _send_message(bot, chat_id, text, reply_markup=kb)
 
 
-async def handle_help(bot: TelegramBot, chat_id: int | str, user: dict) -> None:
+async def handle_help(bot: Bot, chat_id: int | str, user: dict) -> None:
     is_admin = user.get("is_admin", False) or user.get("is_owner", False)
     text = build_help_message(is_admin)
-    kb = TelegramBot.keyboard([[TelegramBot.cb_button("⬅️ Back to Menu", "cb:menu")]])
-    await bot.send_message(chat_id, text, reply_markup=kb)
+    kb = _keyboard([[_cb_button("⬅️ Back to Menu", "cb:menu")]])
+    await _send_message(bot, chat_id, text, reply_markup=kb)
 
 
-async def handle_tier(bot: TelegramBot, chat_id: int | str, user: dict) -> None:
+async def handle_tier(bot: Bot, chat_id: int | str, user: dict) -> None:
     tier = user.get("tier", "free")
     is_admin = user.get("is_admin", False) or user.get("is_owner", False)
     text = build_tier_message(tier, is_admin)
-    await bot.send_message(chat_id, text, reply_markup=tier_keyboard())
+    await _send_message(bot, chat_id, text, reply_markup=tier_keyboard())
 
 
-async def handle_search(bot: TelegramBot, chat_id: int | str, user: dict, query: Optional[str] = None) -> None:
+async def handle_search(bot: Bot, chat_id: int | str, user: dict, query: Optional[str] = None) -> None:
     if not query:
         text = (
             "🔍 <b>Search</b>\n\n"
             "Send me a search query or use inline mode.\n"
             "Example: /search imagine dragons"
         )
-        kb = TelegramBot.keyboard([[TelegramBot.cb_button("⬅️ Back", "cb:menu")]])
-        await bot.send_message(chat_id, text, reply_markup=kb)
+        kb = _keyboard([[_cb_button("⬅️ Back", "cb:menu")]])
+        await _send_message(bot, chat_id, text, reply_markup=kb)
         return
 
     _increment_counter(user["telegram_id"], "search_count")
     try:
         results = await dl_search(query, source="youtube", limit=5)
     except Exception as exc:
-        await bot.send_message(chat_id, f"❌ Search failed: {exc}")
+        await _send_message(bot, chat_id, f"❌ Search failed: {exc}")
         return
 
     if not results:
-        await bot.send_message(chat_id, "🔍 No results found.")
+        await _send_message(bot, chat_id, "🔍 No results found.")
         return
 
     lines = [f"🔍 <b>Search results for:</b> {query}\n"]
@@ -590,20 +484,20 @@ async def handle_search(bot: TelegramBot, chat_id: int | str, user: dict, query:
         dur = r.get("duration")
         dur_str = f" ({dur}s)" if dur else ""
         lines.append(f"{i+1}. <b>{title}</b> — {uploader}{dur_str}")
-        buttons.append([TelegramBot.cb_button(f"⬇️ {title[:30]}", f"cb:dl:{r.get('url','')}")])
+        buttons.append([_cb_button(f"⬇️ {title[:30]}", f"cb:dl:{r.get('url','')}")])
 
-    buttons.append([TelegramBot.cb_button("⬅️ Back", "cb:menu")])
-    await bot.send_message(chat_id, "\n".join(lines), reply_markup=TelegramBot.keyboard(buttons))
+    buttons.append([_cb_button("⬅️ Back", "cb:menu")])
+    await _send_message(bot, chat_id, "\n".join(lines), reply_markup=_keyboard(buttons))
 
 
-async def handle_keys(bot: TelegramBot, chat_id: int | str, user: dict) -> None:
+async def handle_keys(bot: Bot, chat_id: int | str, user: dict) -> None:
     telegram_id = user["telegram_id"]
     keys = auth_list_keys(telegram_id)
     key_list = keys.get("keys", []) if isinstance(keys, dict) else []
 
     if not key_list:
         text = "🔑 <b>API Keys</b>\n\nYou don't have any API keys yet.\nCreate one to access the API."
-        await bot.send_message(chat_id, text, reply_markup=keys_keyboard())
+        await _send_message(bot, chat_id, text, reply_markup=keys_keyboard())
         return
 
     lines = ["🔑 <b>Your API Keys</b>\n"]
@@ -614,10 +508,10 @@ async def handle_keys(bot: TelegramBot, chat_id: int | str, user: dict) -> None:
         lines.append(f"{active} <code>{prefix}…</code> — {tier}")
 
     lines.append("\nUse the buttons below to manage keys.")
-    await bot.send_message(chat_id, "\n".join(lines), reply_markup=keys_keyboard())
+    await _send_message(bot, chat_id, "\n".join(lines), reply_markup=keys_keyboard())
 
 
-async def handle_create_key(bot: TelegramBot, chat_id: int | str, user: dict) -> None:
+async def handle_create_key(bot: Bot, chat_id: int | str, user: dict) -> None:
     tier = user.get("tier", "free")
     limits = TIER_LIMITS.get(tier, TIER_LIMITS["free"])
     try:
@@ -641,16 +535,17 @@ async def handle_create_key(bot: TelegramBot, chat_id: int | str, user: dict) ->
     except Exception as exc:
         text = f"❌ Failed to create key: {exc}"
 
-    await bot.send_message(chat_id, text, reply_markup=keys_keyboard())
+    await _send_message(bot, chat_id, text, reply_markup=keys_keyboard())
 
 
-async def handle_buy(bot: TelegramBot, chat_id: int | str, user: dict) -> None:
+async def handle_buy(bot: Bot, chat_id: int | str, user: dict) -> None:
     """Send a Telegram Stars invoice for Pro tier upgrade."""
     payload_str = f"upgrade_pro_{user['telegram_id']}_{int(time.time())}"
     prices = [{"label": "Pro Tier Upgrade", "amount": 100}]  # 100 Stars
 
     try:
-        await bot.send_invoice(
+        await _send_invoice(
+            bot=bot,
             chat_id=chat_id,
             title="Videl-Api Pro Tier",
             description="Upgrade to Pro tier — 1000 daily requests, 10GB monthly, download access",
@@ -670,12 +565,12 @@ async def handle_buy(bot: TelegramBot, chat_id: int | str, user: dict) -> None:
                 break
         _save_users(users)
     except Exception as exc:
-        await bot.send_message(chat_id, f"❌ Payment setup failed: {exc}")
+        await _send_message(bot, chat_id, f"❌ Payment setup failed: {exc}")
 
 
-async def handle_status(bot: TelegramBot, chat_id: int | str) -> None:
+async def handle_status(bot: Bot, chat_id: int | str) -> None:
     try:
-        # Try to hit the API health endpoint if a base URL is configured
+        import aiohttp
         base = settings.api_base_url.rstrip("/")
         async with aiohttp.ClientSession() as session:
             async with session.get(f"{base}/health", timeout=10) as resp:
@@ -699,10 +594,10 @@ async def handle_status(bot: TelegramBot, chat_id: int | str) -> None:
         f"• Metadata embed: {'✅' if features.get('metadata_embed') else '❌'}",
         f"• SponsorBlock: {'✅' if features.get('sponsorblock') else '❌'}",
     ]
-    await bot.send_message(chat_id, "\n".join(lines))
+    await _send_message(bot, chat_id, "\n".join(lines))
 
 
-async def handle_sources(bot: TelegramBot, chat_id: int | str) -> None:
+async def handle_sources(bot: Bot, chat_id: int | str) -> None:
     sources = list_all_sources()
     music = [s for s in sources if s["type"] == "music"][:10]
     lines = ["📡 <b>Supported Sources (Music)</b>\n"]
@@ -710,10 +605,10 @@ async def handle_sources(bot: TelegramBot, chat_id: int | str) -> None:
         search_tag = "🔍" if s.get("supports_search") else ""
         lines.append(f"• {s['name']} {search_tag}")
     lines.append(f"\nTotal: {len(sources)} sources across music, anime, manga, media.")
-    await bot.send_message(chat_id, "\n".join(lines))
+    await _send_message(bot, chat_id, "\n".join(lines))
 
 
-async def handle_settings(bot: TelegramBot, chat_id: int | str, user: dict) -> None:
+async def handle_settings(bot: Bot, chat_id: int | str, user: dict) -> None:
     lang = user.get("language", "en")
     notify = "✅ On" if user.get("notifications", True) else "❌ Off"
     text = (
@@ -721,10 +616,10 @@ async def handle_settings(bot: TelegramBot, chat_id: int | str, user: dict) -> N
         f"Language: {lang}\n"
         f"Notifications: {notify}\n"
     )
-    await bot.send_message(chat_id, text, reply_markup=settings_keyboard())
+    await _send_message(bot, chat_id, text, reply_markup=settings_keyboard())
 
 
-async def handle_playlist(bot: TelegramBot, chat_id: int | str, user: dict) -> None:
+async def handle_playlist(bot: Bot, chat_id: int | str, user: dict) -> None:
     text = (
         "📋 <b>Playlists</b>\n\n"
         "Manage your playlists via the API:\n"
@@ -732,37 +627,38 @@ async def handle_playlist(bot: TelegramBot, chat_id: int | str, user: dict) -> N
         "GET /v1/playlists — List\n"
         "Use inline search to find tracks to add."
     )
-    await bot.send_message(chat_id, text, reply_markup=TelegramBot.keyboard([[TelegramBot.cb_button("⬅️ Back", "cb:menu")]] ))
+    await _send_message(bot, chat_id, text, reply_markup=_keyboard([[_cb_button("⬅️ Back", "cb:menu")]] ))
 
 
-async def handle_history(bot: TelegramBot, chat_id: int | str, user: dict) -> None:
+async def handle_history(bot: Bot, chat_id: int | str, user: dict) -> None:
     jobs = await dl_list_jobs()
     user_jobs = [j for j in jobs if j.get("user_id") == user["telegram_id"]] if isinstance(jobs, list) else []
     if not user_jobs:
-        await bot.send_message(chat_id, "📦 No download history yet.")
+        await _send_message(bot, chat_id, "📦 No download history yet.")
         return
     lines = ["📦 <b>Recent Downloads</b>\n"]
     for j in user_jobs[-5:]:
         status = j.get("status", "unknown")
         title = j.get("title", "Unknown")
         lines.append(f"• {title} — {status}")
-    await bot.send_message(chat_id, "\n".join(lines))
+    await _send_message(bot, chat_id, "\n".join(lines))
 
 
-async def handle_notify(bot: TelegramBot, chat_id: int | str, user: dict) -> None:
+async def handle_notify(bot: Bot, chat_id: int | str, user: dict) -> None:
     current = "✅ On" if user.get("notifications", True) else "❌ Off"
     new_state = not user.get("notifications", True)
     _set_user_field(user["telegram_id"], "notifications", new_state)
     state_str = "✅ On" if new_state else "❌ Off"
-    await bot.send_message(chat_id, f"𔔨 Notifications are now {state_str}.")
+    await _send_message(bot, chat_id, f"𔔨 Notifications are now {state_str}.")
 
 
-async def handle_feedback(bot: TelegramBot, chat_id: int | str, user: dict, text: Optional[str] = None) -> None:
+async def handle_feedback(bot: Bot, chat_id: int | str, user: dict, text: Optional[str] = None) -> None:
     if not text:
-        await bot.send_message(
+        await _send_message(
+            bot,
             chat_id,
             "📝 <b>Feedback</b>\n\nSend your feedback after this message.\nExample: /feedback Great app!",
-            reply_markup=TelegramBot.keyboard([[TelegramBot.cb_button("⬅️ Back", "cb:menu")]]),
+            reply_markup=_keyboard([[_cb_button("⬅️ Back", "cb:menu")]]),
         )
         return
     # Store feedback
@@ -775,57 +671,57 @@ async def handle_feedback(bot: TelegramBot, chat_id: int | str, user: dict, text
             })
             break
     _save_users(users)
-    await bot.send_message(chat_id, "✅ Thank you for your feedback!")
+    await _send_message(bot, chat_id, "✅ Thank you for your feedback!")
 
 
-async def handle_language(bot: TelegramBot, chat_id: int | str, user: dict, lang: Optional[str] = None) -> None:
+async def handle_language(bot: Bot, chat_id: int | str, user: dict, lang: Optional[str] = None) -> None:
     if not lang:
-        kb = TelegramBot.keyboard([
-            [TelegramBot.cb_button("English", "cb:lang:en"), TelegramBot.cb_button("Español", "cb:lang:es")],
-            [TelegramBot.cb_button("Français", "cb:lang:fr"), TelegramBot.cb_button("中文", "cb:lang:zh")],
-            [TelegramBot.cb_button("⬅️ Back", "cb:settings")],
+        kb = _keyboard([
+            [_cb_button("English", "cb:lang:en"), _cb_button("Español", "cb:lang:es")],
+            [_cb_button("Français", "cb:lang:fr"), _cb_button("中文", "cb:lang:zh")],
+            [_cb_button("⬅️ Back", "cb:settings")],
         ])
-        await bot.send_message(chat_id, "🌐 <b>Choose Language</b>", reply_markup=kb)
+        await _send_message(bot, chat_id, "🌐 <b>Choose Language</b>", reply_markup=kb)
         return
     _set_user_field(user["telegram_id"], "language", lang)
-    await bot.send_message(chat_id, f"✅ Language set to {lang}.")
+    await _send_message(bot, chat_id, f"✅ Language set to {lang}.")
 
 
 # ---------------------------------------------------------------------------
 # Admin handlers
 # ---------------------------------------------------------------------------
 
-async def handle_admin(bot: TelegramBot, chat_id: int | str, user: dict) -> None:
+async def handle_admin(bot: Bot, chat_id: int | str, user: dict) -> None:
     if not (user.get("is_admin") or user.get("is_owner")):
-        await bot.send_message(chat_id, "❌ Owner access required.")
+        await _send_message(bot, chat_id, "❌ Owner access required.")
         return
-    await bot.send_message(chat_id, "👑 <b>Admin Panel</b>", reply_markup=admin_keyboard())
+    await _send_message(bot, chat_id, "👑 <b>Admin Panel</b>", reply_markup=admin_keyboard())
 
 
-async def handle_broadcast(bot: TelegramBot, chat_id: int | str, user: dict, text: Optional[str] = None) -> None:
+async def handle_broadcast(bot: Bot, chat_id: int | str, user: dict, text: Optional[str] = None) -> None:
     if not (user.get("is_admin") or user.get("is_owner")):
-        await bot.send_message(chat_id, "❌ Owner access required.")
+        await _send_message(bot, chat_id, "❌ Owner access required.")
         return
     if not text:
-        await bot.send_message(chat_id, "Send the broadcast message after /broadcast.")
+        await _send_message(bot, chat_id, "Send the broadcast message after /broadcast.")
         return
     users = _load_users()
     sent = 0
     failed = 0
     for u in users:
         try:
-            await bot.send_message(u["telegram_id"], f"📢 <b>Broadcast:</b>\n{text}")
+            await _send_message(bot, u["telegram_id"], f"📢 <b>Broadcast:</b>\n{text}")
             sent += 1
         except Exception:
             failed += 1
-    await bot.send_message(chat_id, f"✅ Broadcast sent: {sent} success, {failed} failed.")
+    await _send_message(bot, chat_id, f"✅ Broadcast sent: {sent} success, {failed} failed.")
 
 
 # ---------------------------------------------------------------------------
 # Inline query handler (search from anywhere)
 # ---------------------------------------------------------------------------
 
-async def handle_inline_query(bot: TelegramBot, inline_query_id: str, query: str, user_id: int) -> None:
+async def handle_inline_query(bot: Bot, inline_query_id: str, query: str, user_id: int) -> None:
     if not query.strip():
         results = [{
             "type": "article",
@@ -849,7 +745,7 @@ async def handle_inline_query(bot: TelegramBot, inline_query_id: str, query: str
                 "performer": r.get("uploader", "Unknown"),
                 "caption": f"🎵 {r.get('title','Unknown')}\n👤 {r.get('uploader','Unknown')}",
             })
-    await bot.answer_inline_query(inline_query_id, results)
+    await _answer_inline_query(bot, inline_query_id, results)
 
 
 # ---------------------------------------------------------------------------
@@ -911,10 +807,11 @@ async def process_update(update: dict) -> None:
         elif command == "/broadcast":
             await handle_broadcast(bot, chat_id, user, args or None)
         elif command in ("/download", "/info", "/lyrics"):
-            await bot.send_message(
+            await _send_message(
+                bot,
                 chat_id,
                 f"🔧 {command} — send a URL or use inline mode.",
-                reply_markup=TelegramBot.keyboard([[TelegramBot.cb_button("⬅️ Menu", "cb:menu")]]),
+                reply_markup=_keyboard([[_cb_button("⬅️ Menu", "cb:menu")]]),
             )
         else:
             # Unknown command — show menu
@@ -931,7 +828,7 @@ async def process_update(update: dict) -> None:
         tg_id = from_user.get("id")
         user = _get_or_create_user(tg_id, from_user.get("username", ""), from_user.get("first_name", ""))
 
-        await bot.answer_callback_query(cb_id)
+        await _answer_callback_query(bot, cb_id)
 
         if data == "cb:menu":
             await handle_start(bot, chat_id, user, message_id)
@@ -964,21 +861,21 @@ async def process_update(update: dict) -> None:
         elif data == "cb:admin":
             await handle_admin(bot, chat_id, user)
         elif data == "cb:admin:users":
-            await bot.send_message(chat_id, "👥 User management via API: GET /v1/users")
+            await _send_message(bot, chat_id, "👥 User management via API: GET /v1/users")
         elif data == "cb:admin:stats":
-            await bot.send_message(chat_id, "📊 Stats via API: GET /v1/stats/global")
+            await _send_message(bot, chat_id, "📊 Stats via API: GET /v1/stats/global")
         elif data == "cb:admin:broadcast":
-            await bot.send_message(chat_id, "📢 Use /broadcast <message>")
+            await _send_message(bot, chat_id, "📢 Use /broadcast <message>")
         elif data == "cb:admin:keys":
-            await bot.send_message(chat_id, "🔑 All keys via API: GET /v1/web/owner/keys")
+            await _send_message(bot, chat_id, "🔑 All keys via API: GET /v1/web/owner/keys")
         elif data == "cb:admin:system":
-            await bot.send_message(chat_id, "⚙️ System status via API: GET /health")
+            await _send_message(bot, chat_id, "⚙️ System status via API: GET /health")
         elif data.startswith("cb:dl:"):
             url = data[5:]
             await handle_search(bot, chat_id, user, f"download {url}")
         elif data.startswith("cb:tier:"):
             tier = data.split(":")[2]
-            await bot.send_message(chat_id, f"Tier {tier} — use /buy to upgrade to Pro.")
+            await _send_message(bot, chat_id, f"Tier {tier} — use /buy to upgrade to Pro.")
         elif data.startswith("cb:lang:"):
             lang = data.split(":")[2]
             await handle_language(bot, chat_id, user, lang)
@@ -993,7 +890,7 @@ async def process_update(update: dict) -> None:
     # --- Pre-checkout query (Stars payment) ---
     elif "pre_checkout_query" in update:
         pcq = update["pre_checkout_query"]
-        await bot.answer_pre_checkout_query(pcq["id"], ok=True)
+        await _answer_pre_checkout_query(bot, pcq["id"], ok=True)
 
     # --- Successful payment ---
     elif "message" in update and update["message"].get("successful_payment"):
@@ -1012,7 +909,8 @@ async def process_update(update: dict) -> None:
         _set_user_field(tg_id, "lifetime_stars", user.get("lifetime_stars", 0) + amount)
         _set_user_field(tg_id, "scopes", ["read", "search", "download"])
 
-        await bot.send_message(
+        await _send_message(
+            bot,
             chat_id,
             f"🎉 <b>Payment Successful!</b>\n\n"
             f"Amount: {amount} {currency}\n"
@@ -1039,7 +937,10 @@ async def set_webhook(base_url: str) -> None:
     if not bot:
         return
     webhook_url = f"{base_url.rstrip('/')}/v1/telegram/webhook"
-    await bot._request("setWebhook", {"url": webhook_url, "allowed_updates": ["message", "callback_query", "inline_query", "pre_checkout_query", "message"]})
+    await bot.set_webhook(
+        url=webhook_url,
+        allowed_updates=["message", "callback_query", "inline_query", "pre_checkout_query"],
+    )
     logger.info(f"Telegram webhook set: {webhook_url}")
 
 
@@ -1047,7 +948,7 @@ async def delete_webhook() -> None:
     bot = await get_bot()
     if not bot:
         return
-    await bot._request("deleteWebhook", {})
+    await bot.delete_webhook(drop_pending_updates=True)
     logger.info("Telegram webhook deleted")
 
 
@@ -1086,16 +987,20 @@ async def set_bot_commands() -> None:
 async def start_bot_polling() -> None:
     """Long-polling entry point (for standalone bot mode)."""
     bot = await get_bot()
-    if not bot:
+    dp = _dp
+    if not bot or not dp:
         return
+
+    # Feed updates via aiogram's Dispatcher for polling
     offset = 0
     logger.info("Telegram bot polling started")
     while True:
         try:
-            updates = await bot._request("getUpdates", {"offset": offset, "timeout": 30, "limit": 100})
+            updates = await bot.get_updates(offset=offset, timeout=30, limit=100)
             for upd in updates:
-                offset = upd["update_id"] + 1
-                asyncio.create_task(process_update(upd))
+                offset = upd.update_id + 1
+                # Convert aiogram Update object to dict for process_update
+                await process_update(upd.model_dump())
         except Exception as exc:
             msg = str(exc)
             if "Conflict" in msg or "terminated by other getUpdates" in msg:
