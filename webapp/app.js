@@ -3,20 +3,20 @@
  * Provides type-safe access to Telegram WebApp features
  */
 const tg = window.Telegram?.WebApp || window.tg?.WebApp;
-export { tg };
-export function getInitData() {
+{ tg };
+function getInitData() {
     return tg?.initData || "";
 }
-export function getTelegramUser() {
+function getTelegramUser() {
     return tg?.initDataUnsafe?.user || null;
 }
-export function isTelegramWebApp() {
+function isTelegramWebApp() {
     return !!tg;
 }
-export function getThemeParams() {
+function getThemeParams() {
     return tg?.themeParams || {};
 }
-export function initWebApp() {
+function initWebApp() {
     if (tg) {
         tg.ready();
         tg.expand();
@@ -26,7 +26,7 @@ export function initWebApp() {
         tg.BackButton.hide();
     }
 }
-export function haptic(type) {
+function haptic(type) {
     if (!tg)
         return;
     try {
@@ -43,20 +43,20 @@ export function haptic(type) {
     }
     catch { }
 }
-export function showAlert(message) {
+function showAlert(message) {
     tg?.showAlert(message);
 }
-export function showConfirm(message, callback) {
+function showConfirm(message, callback) {
     tg?.showConfirm(message, callback);
 }
-export function showPopup(params, callback) {
+function showPopup(params, callback) {
     tg?.showPopup(params, callback);
 }
 /**
  * API Client - TypeScript
  * Full-featured client for Videl-Api with all 222+ endpoints
  */
-const API_BASE = import.meta.env?.VITE_API_BASE || window.location.origin;
+const API_BASE = window.location.origin;
 class ApiClient {
     constructor() {
         this.token = null;
@@ -747,7 +747,7 @@ class ApiClient {
         return this.ws?.readyState === WebSocket.OPEN;
     }
 }
-export const api = new ApiClient();
+const api = new ApiClient();
 /**
  * State Management - TypeScript
  * Centralized app state with reactivity
@@ -877,16 +877,13 @@ class Store {
             this.state.language = lang;
     }
 }
-export const store = new Store();
+const store = new Store();
 /**
  * UI Components - TypeScript
  * Comprehensive component library for Videl-Api WebApp
  */
-import { tg, haptic, showAlert, showConfirm, isTelegramWebApp } from "./telegram";
-import { api } from "./api";
-import { store } from "./store";
 // ---- DOM helpers ----
-export function el(tag, props = {}, children = []) {
+function el(tag, props = {}, children = []) {
     const e = document.createElement(tag);
     for (const [k, v] of Object.entries(props)) {
         if (k === "className")
@@ -915,11 +912,11 @@ export function el(tag, props = {}, children = []) {
     }
     return e;
 }
-export function clear(container) {
+function clear(container) {
     container.innerHTML = "";
 }
 // ---- Format helpers ----
-export function formatBytes(bytes) {
+function formatBytes(bytes) {
     if (bytes === 0)
         return "0 B";
     const k = 1024;
@@ -927,10 +924,10 @@ export function formatBytes(bytes) {
     const i = Math.floor(Math.log(bytes) / Math.log(k));
     return parseFloat((bytes / Math.pow(k, i)).toFixed(2)) + " " + sizes[i];
 }
-export function formatNumber(n) {
+function formatNumber(n) {
     return n.toLocaleString();
 }
-export function formatDuration(seconds) {
+function formatDuration(seconds) {
     if (!seconds)
         return "--";
     const h = Math.floor(seconds / 3600);
@@ -938,7 +935,7 @@ export function formatDuration(seconds) {
     const s = Math.floor(seconds % 60);
     return h > 0 ? `${h}:${m.toString().padStart(2, "0")}:${s.toString().padStart(2, "0")}` : `${m}:${s.toString().padStart(2, "0")}`;
 }
-export function formatDate(iso) {
+function formatDate(iso) {
     if (!iso)
         return "--";
     try {
@@ -948,7 +945,7 @@ export function formatDate(iso) {
         return iso;
     }
 }
-export function tierColor(tier) {
+function tierColor(tier) {
     const colors = {
         free: "#00b894",
         pro: "#6c5ce7",
@@ -956,7 +953,7 @@ export function tierColor(tier) {
     };
     return colors[tier] || "#666";
 }
-export function tierBadge(tier) {
+function tierBadge(tier) {
     return el("span", {
         className: "tier-badge",
         style: {
@@ -973,7 +970,7 @@ export function tierBadge(tier) {
     });
 }
 // ---- Status helpers ----
-export function statusBadge(status) {
+function statusBadge(status) {
     const colors = {
         queued: "#6c5ce7",
         downloading: "#0088cc",
@@ -998,7 +995,7 @@ export function statusBadge(status) {
     });
 }
 // ---- Progress bar ----
-export function progressBar(progress, fillClass) {
+function progressBar(progress, fillClass) {
     return el("div", {
         className: "progress-container",
         style: {
@@ -1023,7 +1020,7 @@ export function progressBar(progress, fillClass) {
     });
 }
 // ---- Layout ----
-export function renderPageHeader(title, subtitle) {
+function renderPageHeader(title, subtitle) {
     return el("header", {
         className: "page-header",
         style: {
@@ -1050,7 +1047,7 @@ export function renderPageHeader(title, subtitle) {
         ],
     });
 }
-export function renderCard(children, style) {
+function renderCard(children, style) {
     return el("div", {
         className: "card",
         style: {
@@ -1065,7 +1062,7 @@ export function renderCard(children, style) {
     });
 }
 // ---- Buttons ----
-export function btnPrimary(text, onClick, disabled = false) {
+function btnPrimary(text, onClick, disabled = false) {
     return el("button", {
         className: "btn-primary",
         style: {
@@ -1085,7 +1082,7 @@ export function btnPrimary(text, onClick, disabled = false) {
         onClick,
     });
 }
-export function btnSecondary(text, onClick, danger = false) {
+function btnSecondary(text, onClick, danger = false) {
     return el("button", {
         style: {
             padding: "10px 18px",
@@ -1105,7 +1102,7 @@ export function btnSecondary(text, onClick, danger = false) {
     });
 }
 // ---- Stat Card ----
-export function renderStatCard(label, value, color, icon) {
+function renderStatCard(label, value, color, icon) {
     return el("div", {
         className: "stat-card",
         style: {
@@ -1137,7 +1134,7 @@ export function renderStatCard(label, value, color, icon) {
     });
 }
 // ---- Empty State ----
-export function renderEmptyState(icon, title, subtitle, action) {
+function renderEmptyState(icon, title, subtitle, action) {
     return el("div", {
         className: "empty-state",
         style: {
@@ -1160,7 +1157,7 @@ export function renderEmptyState(icon, title, subtitle, action) {
     });
 }
 // ---- Loading ----
-export function renderLoading(container) {
+function renderLoading(container) {
     clear(container);
     container.appendChild(el("div", {
         className: "loading",
@@ -1189,7 +1186,7 @@ export function renderLoading(container) {
     }));
 }
 // ---- Auth Screen ----
-export function renderAuthScreen(container, onAuth) {
+function renderAuthScreen(container, onAuth) {
     clear(container);
     const user = window.Telegram?.WebApp?.initDataUnsafe?.user;
     if (user) {
@@ -1243,7 +1240,7 @@ export function renderAuthScreen(container, onAuth) {
     }));
 }
 // ---- Dashboard ----
-export async function renderDashboard(container, user) {
+async function renderDashboard(container, user) {
     clear(container);
     const s = store;
     // Header
@@ -1399,7 +1396,7 @@ export async function renderDashboard(container, user) {
     }
 }
 // ---- Key Card ----
-export function renderKeyCard(k) {
+function renderKeyCard(k) {
     const s = store;
     return el("div", {
         className: "key-card",
@@ -1486,7 +1483,7 @@ function showConfirmAsync(message) {
     });
 }
 // ---- Create Key Modal ----
-export function renderCreateKeyModal() {
+function renderCreateKeyModal() {
     const s = store;
     const modal = el("div", {
         id: "create-key-modal",
@@ -1648,7 +1645,7 @@ export function renderCreateKeyModal() {
     return modal;
 }
 // ---- Key Result Modal ----
-export function renderKeyResultModal() {
+function renderKeyResultModal() {
     const s = store;
     const modal = el("div", {
         id: "key-result-modal",
@@ -1752,7 +1749,7 @@ export function renderKeyResultModal() {
     return modal;
 }
 // ---- Sources Screen ----
-export async function renderSources(container) {
+async function renderSources(container) {
     clear(container);
     container.appendChild(el("div", {
         className: "loading",
@@ -1841,7 +1838,7 @@ export async function renderSources(container) {
     }
 }
 // ---- Search Screen ----
-export async function renderSearch(container) {
+async function renderSearch(container) {
     clear(container);
     const searchInput = el("input", {
         type: "text",
@@ -1967,7 +1964,7 @@ function renderSearchResult(r) {
     });
 }
 // ---- Download Manager Screen ----
-export async function renderDownloads(container) {
+async function renderDownloads(container) {
     clear(container);
     container.appendChild(el("h2", {
         textContent: "Download Manager",
@@ -2419,7 +2416,7 @@ function renderDownloadCard(job) {
     });
 }
 // ---- Settings Screen ----
-export async function renderSettings(container) {
+async function renderSettings(container) {
     clear(container);
     const s = store;
     container.appendChild(el("h2", {
@@ -2618,7 +2615,7 @@ function renderSettingToggle(title, checked, onChange) {
         ],
     });
 }
-export function applyTheme(theme) {
+function applyTheme(theme) {
     if (theme === "dark" || (theme === "system" && window.matchMedia?.("(prefers-color-scheme: dark)").matches)) {
         document.documentElement.setAttribute("data-theme", "dark");
     }
@@ -2627,7 +2624,7 @@ export function applyTheme(theme) {
     }
 }
 // ---- Admin Screen ----
-export async function renderAdmin(container) {
+async function renderAdmin(container) {
     clear(container);
     container.appendChild(el("h2", {
         textContent: "Admin Panel",
@@ -2680,9 +2677,6 @@ export async function renderAdmin(container) {
  * Main Application - TypeScript
  * Videl-Api WebApp entry point with routing and layout
  */
-import { tg, initWebApp, haptic, isTelegramWebApp } from "./telegram";
-import { store } from "./store";
-import { el, clear, renderAuthScreen, renderDashboard, renderSearch, renderDownloads, renderSettings, renderAdmin, renderEmptyState, applyTheme, } from "./components";
 // Navigation state
 let currentUser = null;
 let currentView = "auth";
@@ -2907,4 +2901,4 @@ function init() {
     });
 }
 init();
-export { nav, currentUser };
+{ nav, currentUser };

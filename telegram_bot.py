@@ -16,7 +16,6 @@ Full-featured Telegram Bot built on aiogram 3.x:
 from __future__ import annotations
 
 import asyncio
-import fcntl
 import json
 import logging
 import os
@@ -71,7 +70,6 @@ _bot: Optional[Bot] = None
 _bot_lock = asyncio.Lock()
 _bot_initialized = False
 _polling_active = False
-_poll_lock_file: Optional[Any] = None
 
 
 async def get_bot() -> Optional[Bot]:
@@ -1272,94 +1270,69 @@ async def set_bot_commands() -> None:
 async def start_bot_polling() -> None:
     """Long-polling entry point (for standalone bot mode).
 
-    Uses a cross-process file lock so only ONE process at a time can
-    call Telegram's getUpdates.  If another instance already holds the
-    lock, this process skips polling entirely rather than conflicting.
+    Telegram only allows ONE getUpdates connection per bot token.
+    If another instance is already polling, we get a Conflict error.
+    This handler never crashes — it retries indefinitely with
+    exponential backoff until the conflict clears.
     """
-    global _polling_active, _poll_lock_file
+    global _polling_active
 
     if _polling_active:
         logger.warning("Telegram polling already active; not starting duplicate loop")
-        return
-
-    # Cross-process file lock: only one process may poll at a time.
-    lock_path = os.path.join(os.getenv("TMPDIR", "/tmp"), "videl_telegram_poll.lock")
-    try:
-        _poll_lock_file = open(lock_path, "w")
-        fcntl.flock(_poll_lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
-    except (IOError, OSError):
-        # Another process already holds the lock — skip polling.
-        try:
-            _poll_lock_file.close()
-        except Exception:
-            pass
-        _poll_lock_file = None
-        logger.info(
-            "Telegram polling lock held by another process; "
-            "skipping polling in this instance."
-        )
         return
 
     _polling_active = True
     bot = await get_bot()
     if not bot:
         _polling_active = False
-        try:
-            fcntl.flock(_poll_lock_file.fileno(), fcntl.LOCK_UN)
-        except Exception:
-            pass
-        _poll_lock_file.close()
-        _poll_lock_file = None
         return
 
-    # Small startup delay to let any previous process release Telegram's getUpdates
-    await asyncio.sleep(3)
+    # Startup delay to let any previous process fully release Telegram's getUpdates
+    await asyncio.sleep(5)
 
     # Clear any existing webhook so polling can work without conflicts
-    try:
-        await bot.delete_webhook(drop_pending_updates=True)
-        logger.info("Cleared existing webhook before starting polling")
-    except Exception as exc:
-        logger.warning(f"Could not clear webhook before polling: {exc}")
+    for attempt in range(5):
+        try:
+            await bot.delete_webhook(drop_pending_updates=True)
+            logger.info("Cleared existing webhook before starting polling")
+            break
+        except Exception as exc:
+            logger.warning(
+                f"Could not clear webhook before polling (attempt {attempt + 1}/5): {exc}"
+            )
+            await asyncio.sleep(2)
 
     offset = 0
     logger.info("Telegram bot polling started")
-    conflict_backoff = 30
+    conflict_backoff = 5
     try:
         while True:
             try:
                 updates = await bot.get_updates(offset=offset, timeout=30, limit=100)
-                conflict_backoff = 30  # reset on success
+                conflict_backoff = 5  # reset on success
                 for upd in updates:
                     offset = upd.update_id + 1
                     await process_update(upd.model_dump())
             except Exception as exc:
                 msg = str(exc)
                 if "Conflict" in msg or "terminated by other getUpdates" in msg:
+                    # Never crash on conflict — retry indefinitely with backoff
                     logger.warning(
-                        "Telegram polling conflict: another bot instance is running. "
-                        f"Backing off {conflict_backoff}s.",
+                        "Telegram polling conflict (another instance may be running). "
+                        f"Retrying in {conflict_backoff}s..."
                     )
-                    # Try to clear webhook again in case a stale instance set one
                     try:
                         await bot.delete_webhook(drop_pending_updates=True)
                     except Exception:
                         pass
                     await asyncio.sleep(conflict_backoff)
-                    conflict_backoff = min(conflict_backoff * 2, 300)
+                    conflict_backoff = min(conflict_backoff * 2, 600)
                 else:
                     logger.error(f"Polling error: {exc}")
                     await asyncio.sleep(5)
+    except asyncio.CancelledError:
+        logger.info("Telegram bot polling cancelled (shutdown)")
+        raise
     finally:
         _polling_active = False
         logger.info("Telegram bot polling stopped")
-        # Release the cross-process lock
-        try:
-            fcntl.flock(_poll_lock_file.fileno(), fcntl.LOCK_UN)
-        except Exception:
-            pass
-        try:
-            _poll_lock_file.close()
-        except Exception:
-            pass
-        _poll_lock_file = None
