@@ -1117,6 +1117,13 @@ async def start_bot_polling() -> None:
     if not bot:
         return
 
+    # Clear any existing webhook so polling can work without conflicts
+    try:
+        await bot.delete_webhook(drop_pending_updates=True)
+        logger.info("Cleared existing webhook before starting polling")
+    except Exception as exc:
+        logger.warning(f"Could not clear webhook before polling: {exc}")
+
     offset = 0
     logger.info("Telegram bot polling started")
     while True:
