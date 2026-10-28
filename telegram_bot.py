@@ -16,6 +16,7 @@ Full-featured Telegram Bot built on aiogram 3.x:
 from __future__ import annotations
 
 import asyncio
+import fcntl
 import json
 import logging
 import os
@@ -70,6 +71,7 @@ _bot: Optional[Bot] = None
 _bot_lock = asyncio.Lock()
 _bot_initialized = False
 _polling_active = False
+_poll_lock_file: Optional[Any] = None
 
 
 async def get_bot() -> Optional[Bot]:
@@ -1268,15 +1270,46 @@ async def set_bot_commands() -> None:
 
 
 async def start_bot_polling() -> None:
-    """Long-polling entry point (for standalone bot mode)."""
-    global _polling_active
+    """Long-polling entry point (for standalone bot mode).
+
+    Uses a cross-process file lock so only ONE process at a time can
+    call Telegram's getUpdates.  If another instance already holds the
+    lock, this process skips polling entirely rather than conflicting.
+    """
+    global _polling_active, _poll_lock_file
+
     if _polling_active:
         logger.warning("Telegram polling already active; not starting duplicate loop")
         return
+
+    # Cross-process file lock: only one process may poll at a time.
+    lock_path = os.path.join(os.getenv("TMPDIR", "/tmp"), "videl_telegram_poll.lock")
+    try:
+        _poll_lock_file = open(lock_path, "w")
+        fcntl.flock(_poll_lock_file.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+    except (IOError, OSError):
+        # Another process already holds the lock — skip polling.
+        try:
+            _poll_lock_file.close()
+        except Exception:
+            pass
+        _poll_lock_file = None
+        logger.info(
+            "Telegram polling lock held by another process; "
+            "skipping polling in this instance."
+        )
+        return
+
     _polling_active = True
     bot = await get_bot()
     if not bot:
         _polling_active = False
+        try:
+            fcntl.flock(_poll_lock_file.fileno(), fcntl.LOCK_UN)
+        except Exception:
+            pass
+        _poll_lock_file.close()
+        _poll_lock_file = None
         return
 
     # Small startup delay to let any previous process release Telegram's getUpdates
@@ -1320,3 +1353,13 @@ async def start_bot_polling() -> None:
     finally:
         _polling_active = False
         logger.info("Telegram bot polling stopped")
+        # Release the cross-process lock
+        try:
+            fcntl.flock(_poll_lock_file.fileno(), fcntl.LOCK_UN)
+        except Exception:
+            pass
+        try:
+            _poll_lock_file.close()
+        except Exception:
+            pass
+        _poll_lock_file = None
