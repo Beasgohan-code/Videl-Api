@@ -248,6 +248,47 @@ def rich_section(title: str, body: str, icon: str = "🔸") -> str:
 
 
 # ---------------------------------------------------------------------------
+# URL detection for auto-download
+# ---------------------------------------------------------------------------
+
+import re
+
+URL_PATTERN = re.compile(
+    r"https?://(?:www\.)?(?:youtube\.com/watch\?v=|youtu\.be/|youtube\.com/playlist\?list=|"
+    r"soundcloud\.com/|open\.spotify\.com/|music\.apple\.com/|deezer\.com/|bandcamp\.com/)"
+    r"[a-zA-Z0-9\-_?=&/%#.]+"
+)
+
+SUPPORTED_DOMAINS = {
+    "youtube.com": "YouTube",
+    "youtu.be": "YouTube",
+    "soundcloud.com": "SoundCloud",
+    "open.spotify.com": "Spotify",
+    "music.apple.com": "Apple Music",
+    "deezer.com": "Deezer",
+    "bandcamp.com": "Bandcamp",
+}
+
+
+def detect_urls(text: str) -> list[str]:
+    """Detect all supported media URLs in text."""
+    return URL_PATTERN.findall(text or "")
+
+
+def detect_source_from_url(url: str) -> str:
+    """Detect the source platform from a URL."""
+    for domain, name in SUPPORTED_DOMAINS.items():
+        if domain in url:
+            return name
+    return "Unknown"
+
+
+def is_playlist_url(url: str) -> bool:
+    """Check if URL is a playlist."""
+    return "playlist" in url or "list=" in url
+
+
+# ---------------------------------------------------------------------------
 # Inline keyboard builders (aiogram types)
 # ---------------------------------------------------------------------------
 
@@ -370,6 +411,13 @@ def build_help_message(is_admin: bool = False, is_owner: bool = False) -> str:
     for c, d in [("/settings", "User settings & language"), ("/notify", "Notification preferences"), ("/source", "List supported sources"), ("/status", "System status"), ("/language", "Change interface language")]:
         lines.append(f"  <b>/{c}</b> — {d}")
     lines.append("")
+
+    # Auto-detect & batch
+    lines.append("🔗 <b>Auto-Detect & Batch</b>")
+    for c, d in [("/batch", "Batch download multiple URLs"), ("/recent", "Recent downloads"), ("/platforms", "Supported platforms")]:
+        lines.append(f"  <b>/{c}</b> — {d}")
+    lines.append("")
+    lines.append("💡 Just paste any media link and I'll auto-detect it!")
 
     # Feedback
     lines.append("📝 <b>Feedback</b>")
@@ -1191,6 +1239,139 @@ async def cmd_stats(message: Message):
     await handle_stats(message.bot, message.chat.id, _extract_user_from_message(message))
 
 
+async def cmd_autodetect(message: Message):
+    """Auto-detect URLs in regular text messages and offer to download them."""
+    text = message.text or ""
+    if text.startswith("/"):
+        return  # Let command handlers handle these
+
+    urls = detect_urls(text)
+    if not urls:
+        return  # No URLs found, ignore
+
+    user = _extract_user_from_message(message)
+    source_name = detect_source_from_url(urls[0])
+    is_playlist = is_playlist_url(urls[0])
+
+    lines = [
+        rich_heading("🔗 URL Detected", 1),
+        rich_divider("─", 20),
+        f"Found {len(urls)} link(s) from {source_name}:\n",
+    ]
+    for u in urls[:5]:
+        lines.append(f"• {u[:80]}")
+    if len(urls) > 5:
+        lines.append(f"... and {len(urls) - 5} more.")
+    lines.append("")
+
+    if is_playlist:
+        lines.append("📋 This looks like a playlist! Download the whole playlist?")
+    else:
+        lines.append("📥 Download this link?")
+
+    lines.append("\nUse /download <URL> to download, or /batch to download all at once.")
+
+    buttons = []
+    for u in urls[:3]:
+        buttons.append([_cb_button(f"⬇️ Download", f"cb:dl:{u}")])
+    buttons.append([_cb_button("⬅️ Menu", "cb:menu")])
+
+    await _send_message(
+        message.bot,
+        message.chat.id,
+        "\n".join(lines),
+        reply_markup=_keyboard(buttons),
+    )
+
+
+async def cmd_batch(message: Message):
+    """Download multiple URLs at once."""
+    text = message.text or ""
+    args = text[len("/batch"):].strip()
+    urls = detect_urls(args or text)
+
+    if not urls:
+        await _send_message(
+            message.bot,
+            message.chat.id,
+            rich_heading("Batch Download", 1)
+            + rich_divider("─", 20)
+            + "Send me multiple URLs separated by spaces or newlines.\n"
+            + "Example: /batch https://youtu.be/xxx https://youtu.be/yyy",
+            reply_markup=_keyboard([[_cb_button("⬅️ Back", "cb:menu")]])),
+        return
+
+    user = _extract_user_from_message(message)
+    _increment_counter(user["telegram_id"], "download_count", len(urls))
+
+    lines = [
+        rich_heading("Batch Download Queued", 1),
+        rich_divider("─", 20),
+        f"Queued {len(urls)} download(s):\n",
+    ]
+    for u in urls[:10]:
+        lines.append(f"• {u[:70]}")
+    if len(urls) > 10:
+        lines.append(f"... and {len(urls) - 10} more.")
+
+    await _send_message(message.bot, message.chat.id, "\n".join(lines))
+
+    # Enqueue all downloads
+    for u in urls:
+        try:
+            job = DownloadJob(
+                job_id=uuid.uuid4().hex,
+                url=u,
+                source="youtube",
+                user_id=user["telegram_id"],
+            )
+            await dl_enqueue_download(job)
+        except Exception as exc:
+            logger.error(f"Batch download failed for {u}: {exc}")
+
+
+async def cmd_recent(message: Message):
+    """Show recent downloads."""
+    user = _extract_user_from_message(message)
+    try:
+        jobs = await dl_list_jobs()
+    except Exception as exc:
+        await _send_message(message.bot, message.chat.id, f"❌ Failed to load history: {exc}")
+        return
+
+    user_jobs = [j for j in jobs if j.get("user_id") == user["telegram_id"]] if isinstance(jobs, list) else []
+    if not user_jobs:
+        await _send_message(message.bot, message.chat.id, "📦 No recent downloads.")
+        return
+
+    lines = [
+        rich_heading("Recent Downloads", 1),
+        rich_divider("─", 20),
+    ]
+    for j in user_jobs[-5:]:
+        status = j.get("status", "unknown")
+        title = j.get("title", "Unknown")
+        progress = j.get("progress", 0)
+        status_icon = {"completed": "✅", "failed": "❌", "downloading": "⏳", "queued": "⏳"}.get(status, "⏳")
+        lines.append(f"{status_icon} {rich_esc(title)} — {progress:.0f}%")
+
+    await _send_message(message.bot, message.chat.id, "\n".join(lines))
+
+
+async def cmd_platforms(message: Message):
+    """Show supported platforms."""
+    lines = [
+        rich_heading("Supported Platforms", 1),
+        rich_divider("─", 20),
+    ]
+    for domain, name in SUPPORTED_DOMAINS.items():
+        lines.append(f"• {name}")
+    lines.append("\nJust paste any link from these platforms and I'll detect it automatically!")
+    lines.append("Or use /download <URL> to download manually.")
+
+    await _send_message(message.bot, message.chat.id, "\n".join(lines))
+
+
 # --- Callback query adapters (use edit_message instead of send_message to avoid spam) ---
 
 async def cb_menu(callback: CallbackQuery):
@@ -1434,6 +1615,12 @@ def _register_handlers() -> None:
     dp.message.register(cmd_broadcast, Command("broadcast"))
     dp.message.register(cmd_users, Command("users"))
     dp.message.register(cmd_stats, Command("stats"))
+    dp.message.register(cmd_batch, Command("batch"))
+    dp.message.register(cmd_recent, Command("recent"))
+    dp.message.register(cmd_platforms, Command("platforms"))
+
+    # Auto URL detection (catches non-command text with media URLs)
+    dp.message.register(cmd_autodetect, F.text)
 
     # Successful payment
     dp.message.register(successful_payment_handler, F.successful_payment)
@@ -1532,6 +1719,9 @@ async def set_bot_commands() -> None:
         {"command": "broadcast", "description": "Broadcast (owner)"},
         {"command": "users", "description": "User management (owner)"},
         {"command": "stats", "description": "Bot statistics (owner)"},
+        {"command": "batch", "description": "Batch download multiple URLs"},
+        {"command": "recent", "description": "Recent downloads"},
+        {"command": "platforms", "description": "Supported platforms"},
     ]
     await bot.set_my_commands(commands)
     logger.info("Bot commands set")
