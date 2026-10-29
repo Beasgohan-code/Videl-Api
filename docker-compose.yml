@@ -1,0 +1,118 @@
+version: "3.8"
+
+services:
+  # ------------------------------------------------------------------
+  # Videl-Api REST API
+  # ------------------------------------------------------------------
+  videl-api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: videl-api
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      - API_HOST=0.0.0.0
+      - API_PORT=8000
+      - API_BASE_URL=http://localhost:8000
+      - VIDEL_LOG_LEVEL=${VIDEL_LOG_LEVEL:-INFO}
+      - VIDEL_LOG_FORMAT=${VIDEL_LOG_FORMAT:-json}
+      - VIDEL_LOG_DIR=/app/logs
+      - VIDEL_LOG_MAX_BYTES=${VIDEL_LOG_MAX_BYTES:-10485760}
+      - VIDEL_LOG_BACKUP_COUNT=${VIDEL_LOG_BACKUP_COUNT:-5}
+      - VIDEL_WATCHDOG_CHECK_INTERVAL=${VIDEL_WATCHDOG_CHECK_INTERVAL:-30}
+      - VIDEL_WATCHDOG_RECOVERY_INTERVAL=${VIDEL_WATCHDOG_RECOVERY_INTERVAL:-60}
+      - DOWNLOAD_DIR=/app/downloads
+      - DOWNLOAD_MAX_CONCURRENT=${DOWNLOAD_MAX_CONCURRENT:-3}
+      - CORS_ORIGINS=${CORS_ORIGINS:-*}
+      - TELEGRAM_BOT_TOKEN=${TELEGRAM_BOT_TOKEN:-}
+      - TELEGRAM_BOT_USERNAME=${TELEGRAM_BOT_USERNAME:-videl_api_bot}
+      - TELEGRAM_BOT_WEBHOOK_URL=${TELEGRAM_BOT_WEBHOOK_URL:-}
+      - SPOTIFY_ENABLED=${SPOTIFY_ENABLED:-true}
+      - HLS_ENABLED=${HLS_ENABLED:-true}
+      - METADATA_EMBED=${METADATA_EMBED:-true}
+      - ARIA2C_RPC_URL=http://aria2c:6800/jsonrpc
+      - ARIA2C_RPC_SECRET=${ARIA2C_RPC_SECRET:-}
+      - ARIA2C_RPC_ENABLED=${ARIA2C_RPC_ENABLED:-true}
+    env_file:
+      - .env
+      - videl-downloads:/app/downloads
+      - videl-logs:/app/logs
+      - ./.env:/app/.env:ro
+    depends_on:
+      aria2c:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8000/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    networks:
+      - videl-network
+
+  # ------------------------------------------------------------------
+  # aria2c - External multi-connection downloader (optional but recommended)
+  # ------------------------------------------------------------------
+  aria2c:
+    image: p3terx/aria2-pro:latest
+    container_name: videl-aria2c
+    restart: unless-stopped
+    ports:
+      - "6800:6800"
+      - "6888:6888"
+    environment:
+      - PUID=1000
+      - PGID=1000
+      - RPC_SECRET=${ARIA2C_RPC_SECRET:-}
+      - LISTEN_PORT=6888
+      - DHT_PORT=6888
+      - TZ=Asia/Calcutta
+    volumes:
+      - videl-downloads:/downloads
+    healthcheck:
+      test: ["CMD", "curl", "-sf", "http://localhost:6800/jsonrpc"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    networks:
+      - videl-network
+
+  # ------------------------------------------------------------------
+  # MongoDB - Optional persistent storage backend (falls back to JSON files)
+  # ------------------------------------------------------------------
+  mongodb:
+    image: mongo:7.0
+    container_name: videl-mongodb
+    restart: unless-stopped
+    ports:
+      - "27017:27017"
+    environment:
+      - MONGO_INITDB_DATABASE=videl_music
+    volumes:
+      - videl-mongodb:/data/db
+    healthcheck:
+      test: ["CMD", "mongosh", "--eval", "db.adminCommand('ping')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    networks:
+      - videl-network
+
+# ------------------------------------------------------------------
+# Named volumes
+# ------------------------------------------------------------------
+volumes:
+  videl-downloads:
+  videl-logs:
+  videl-mongodb:
+
+# ------------------------------------------------------------------
+# Networks
+# ------------------------------------------------------------------
+networks:
+  videl-network:
+    driver: bridge
