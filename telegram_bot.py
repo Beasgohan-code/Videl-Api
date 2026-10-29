@@ -1,10 +1,13 @@
 """
 Videl-Api Telegram Bot
 
-Full-featured Telegram Bot built on aiogram 3.x:
-- Rich messages (inline keyboards, formatted text)
-- Inline queries, callback queries, inline keyboards
-- Telegram Stars payments (Pro tier upgrade)
+Full-featured Telegram Bot built on aiogram 3.x Dispatcher:
+- Proper handler registration via Dispatcher
+- Message handlers with Command filters
+- Callback query handlers with F.data filters
+- Inline query handlers
+- Pre-checkout query handlers
+- Successful payment handlers (F.successful_payment)
 - Owner / Admin access control
 - User management, tiers, subscriptions
 - Search, download, lyrics, info from the API
@@ -26,14 +29,19 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
-from aiogram import Bot
+from aiogram import Bot, Dispatcher, F
+from aiogram.enums import ParseMode
+from aiogram.client.default import DefaultBotProperties
+from aiogram.filters import Command
 from aiogram.types import (
     InlineKeyboardButton,
     InlineKeyboardMarkup,
+    Message,
+    CallbackQuery,
+    InlineQuery,
+    PreCheckoutQuery,
     Update,
 )
-from aiogram.enums import ParseMode
-from aiogram.client.default import DefaultBotProperties
 
 from config import settings, list_all_sources, MUSIC_SOURCES
 from downloader import (
@@ -61,6 +69,12 @@ from auth import (
 )
 
 logger = logging.getLogger("videl.telegram_bot")
+
+# ---------------------------------------------------------------------------
+# Aiogram Dispatcher (original aiogram pattern)
+# ---------------------------------------------------------------------------
+
+dp = Dispatcher()
 
 # ---------------------------------------------------------------------------
 # Bot instance (lazy init) - aiogram
@@ -423,7 +437,6 @@ async def _send_owner_log(
     parts.append(f"<code>{message}</code>")
     if exc is not None:
         tb = "".join(traceback.format_exception(type(exc), exc, exc.__traceback__))
-        # Trim traceback to fit Telegram message limits
         short_tb = tb[-1200:] if len(tb) > 1200 else tb
         parts.append(f"\n\n<b>Traceback:</b>\n<pre>{short_tb}</pre>")
 
@@ -494,7 +507,7 @@ async def _safe(handler_name: str, coro) -> None:
 
 
 # ---------------------------------------------------------------------------
-# Handler functions
+# Handler functions (core logic, called by aiogram adapters)
 # ---------------------------------------------------------------------------
 
 async def handle_start(bot: Bot, chat_id: int | str, user: dict, message_id: Optional[int] = None) -> None:
@@ -631,7 +644,6 @@ async def handle_lyrics(bot: Bot, chat_id: int | str, user: dict, query: Optiona
         if not lyrics:
             await _send_message(bot, chat_id, "🔍 No lyrics found.")
             return
-        # Telegram message limit is 4096 chars
         if len(lyrics) > 3800:
             lyrics = lyrics[:3800] + "\n…"
         await _send_message(bot, chat_id, f"📝 <b>Lyrics:</b>\n\n{lyrics}")
@@ -711,7 +723,7 @@ async def handle_buy(bot: Bot, chat_id: int | str, user: dict) -> None:
         users = _load_users()
         for u in users:
             if u.get("telegram_id") == user["telegram_id"]:
-                u["pending_payment"] = payload_str
+                u["pending_payment_payload"] = payload_str
                 u["pending_payment_tier"] = "pro"
                 u["pending_payment_amount"] = 100
                 break
@@ -953,262 +965,390 @@ async def handle_inline_query(bot: Bot, inline_query_id: str, query: str, user_i
 
 
 # ---------------------------------------------------------------------------
-# Update dispatcher (robust with per-handler error handling)
+# Aiogram adapter handlers (registered with Dispatcher)
 # ---------------------------------------------------------------------------
 
-async def process_update(update: dict) -> None:
-    """Route a Telegram update to the appropriate handler.
-    
-    All handler exceptions are caught and logged so one bad update
-    cannot kill the polling loop.
-    """
-    bot = await get_bot()
-    if not bot:
-        return
+def _extract_user_from_message(message: Message) -> dict:
+    return _get_or_create_user(
+        message.from_user.id,
+        message.from_user.username or "",
+        message.from_user.first_name or "",
+    )
 
-    try:
-        # --- Message ---
-        if "message" in update:
-            msg = update["message"]
-            if not msg:
-                logger.warning("Received message update with None message")
-                return
-            chat = msg.get("chat")
-            if not chat:
-                logger.warning("Received message without chat field")
-                return
-            chat_id = chat["id"]
-            from_user = msg.get("from", {})
-            if not from_user:
-                from_user = {}
-            tg_id = from_user.get("id")
-            if not tg_id:
-                logger.warning("Received message without user ID")
-                return
-            username = from_user.get("username", "")
-            first_name = from_user.get("first_name", "")
-            text = msg.get("text", "")
-            command = text.split(" ")[0] if text else ""
-            args = text[len(command):].strip() if text else ""
 
-            # --- Successful payment (must be checked before command routing) ---
-            if msg.get("successful_payment"):
-                payment = msg["successful_payment"]
-                amount = payment.get("total_amount", 0)
-                currency = payment.get("currency", "XTR")
-                user = _get_or_create_user(tg_id, username, first_name)
-                _set_user_field(tg_id, "tier", "pro")
-                _set_user_field(tg_id, "stars_balance", user.get("stars_balance", 0) + amount)
-                _set_user_field(tg_id, "lifetime_stars", user.get("lifetime_stars", 0) + amount)
-                _set_user_field(tg_id, "scopes", ["read", "search", "download"])
-                await _send_message(
-                    bot,
-                    chat_id,
-                    "🎉 <b>Payment Successful!</b>\n\n"
-                    f"Amount: {amount} {currency}\n"
-                    "Tier upgraded to: <b>PRO</b>\n\n"
-                    "Your API keys now have Pro limits.\n"
-                    "Use /key to view your keys.",
-                )
-                return
+def _extract_user_from_callback(callback: CallbackQuery) -> dict:
+    return _get_or_create_user(
+        callback.from_user.id,
+        callback.from_user.username or "",
+        callback.from_user.first_name or "",
+    )
 
-            user = _get_or_create_user(tg_id, username, first_name)
 
-            if command == "/start":
-                await _safe("handle_start", handle_start(bot, chat_id, user))
-            elif command == "/help":
-                await _safe("handle_help", handle_help(bot, chat_id, user))
-            elif command == "/tier":
-                await _safe("handle_tier", handle_tier(bot, chat_id, user))
-            elif command == "/search":
-                await _safe("handle_search", handle_search(bot, chat_id, user, args or None))
-            elif command == "/download":
-                if not args:
-                    await _send_message(
-                        bot, chat_id,
-                        "📥 <b>Download</b>\n\nSend me a URL to download.\nExample: /download https://youtu.be/...",
-                        reply_markup=_keyboard([[_cb_button("⬅️ Back", "cb:menu")]]),
-                    )
-                else:
-                    await _safe("handle_download_url", handle_download_url(bot, chat_id, user, args))
-            elif command == "/info":
-                await _safe("handle_info", handle_info(bot, chat_id, user, args or None))
-            elif command == "/lyrics":
-                await _safe("handle_lyrics", handle_lyrics(bot, chat_id, user, args or None))
-            elif command == "/key":
-                await _safe("handle_keys", handle_keys(bot, chat_id, user))
-            elif command == "/createkey" or (command == "/key" and args == "create"):
-                await _safe("handle_create_key", handle_create_key(bot, chat_id, user))
-            elif command == "/buy":
-                await _safe("handle_buy", handle_buy(bot, chat_id, user))
-            elif command == "/status":
-                await _safe("handle_status", handle_status(bot, chat_id))
-            elif command == "/sources":
-                await _safe("handle_sources", handle_sources(bot, chat_id))
-            elif command == "/settings":
-                await _safe("handle_settings", handle_settings(bot, chat_id, user))
-            elif command == "/playlist":
-                await _safe("handle_playlist", handle_playlist(bot, chat_id, user))
-            elif command == "/history":
-                await _safe("handle_history", handle_history(bot, chat_id, user))
-            elif command == "/notify":
-                await _safe("handle_notify", handle_notify(bot, chat_id, user))
-            elif command == "/feedback":
-                await _safe("handle_feedback", handle_feedback(bot, chat_id, user, args or None))
-            elif command == "/language":
-                await _safe("handle_language", handle_language(bot, chat_id, user, args or None))
-            elif command == "/admin":
-                await _safe("handle_admin", handle_admin(bot, chat_id, user))
-            elif command == "/broadcast":
-                await _safe("handle_broadcast", handle_broadcast(bot, chat_id, user, args or None))
-            elif command == "/users":
-                await _safe("handle_users", handle_users(bot, chat_id, user))
-            elif command == "/stats":
-                await _safe("handle_stats", handle_stats(bot, chat_id, user))
-            else:
-                await _safe("handle_start", handle_start(bot, chat_id, user))
+# --- Command adapters ---
 
-        # --- Callback query (inline keyboard) ---
-        elif "callback_query" in update:
-            cb = update["callback_query"]
-            cb_id = cb["id"]
-            data = cb.get("data", "")
-            cb_message = cb.get("message")
-            if not cb_message:
-                logger.warning("Received callback_query without message field")
-                await _answer_callback_query(bot, cb_id)
-                return
-            cb_chat = cb_message.get("chat")
-            if not cb_chat:
-                logger.warning("Received callback_query without chat field")
-                await _answer_callback_query(bot, cb_id)
-                return
-            chat_id = cb_chat["id"]
-            message_id = cb_message["message_id"]
-            from_user = cb.get("from", {})
-            if not from_user:
-                from_user = {}
-            tg_id = from_user.get("id")
-            if not tg_id:
-                logger.warning("Received callback_query without user ID")
-                await _answer_callback_query(bot, cb_id)
-                return
-            user = _get_or_create_user(tg_id, from_user.get("username", ""), from_user.get("first_name", ""))
+async def cmd_start(message: Message):
+    await handle_start(message.bot, message.chat.id, _extract_user_from_message(message))
 
-            await _answer_callback_query(bot, cb_id)
 
-            if data == "cb:menu":
-                await _safe("handle_start", handle_start(bot, chat_id, user, message_id))
-            elif data == "cb:help":
-                await _safe("handle_help", handle_help(bot, chat_id, user))
-            elif data == "cb:tier":
-                await _safe("handle_tier", handle_tier(bot, chat_id, user))
-            elif data == "cb:keys":
-                await _safe("handle_keys", handle_keys(bot, chat_id, user))
-            elif data == "cb:key:create":
-                await _safe("handle_create_key", handle_create_key(bot, chat_id, user))
-            elif data == "cb:key:list":
-                await _safe("handle_keys", handle_keys(bot, chat_id, user))
-            elif data == "cb:key:revoke":
-                # List keys first so user can see what to revoke
-                await _safe("handle_keys", handle_keys(bot, chat_id, user))
-                await _send_message(
-                    bot, chat_id,
-                    "🗑️ <b>Revoke Key</b>\n\nUse the API to revoke a key:\nDELETE /v1/keys/{key_id}\nOr contact support.",
-                    reply_markup=keys_keyboard(),
-                )
-            elif data == "cb:key:rotate":
-                await _send_message(
-                    bot, chat_id,
-                    "🔄 <b>Rotate Key</b>\n\nUse the API to rotate a key:\nPATCH /v1/keys/{key_id}?action=rotate\nOr contact support.",
-                    reply_markup=keys_keyboard(),
-                )
-            elif data == "cb:buy":
-                await _safe("handle_buy", handle_buy(bot, chat_id, user))
-            elif data == "cb:search":
-                await _safe("handle_search", handle_search(bot, chat_id, user, None))
-            elif data == "cb:download":
-                await _send_message(
-                    bot, chat_id,
-                    "📥 <b>Download</b>\n\nSend me a URL to download.\nExample: /download https://youtu.be/...",
-                    reply_markup=_keyboard([[_cb_button("⬅️ Back", "cb:menu")]]),
-                )
-            elif data == "cb:info":
-                await _send_message(
-                    bot, chat_id,
-                    "🎵 <b>Info</b>\n\nSend me a URL or search query.\nExample: /info https://youtu.be/...",
-                    reply_markup=_keyboard([[_cb_button("⬅️ Back", "cb:menu")]]),
-                )
-            elif data == "cb:lyrics":
-                await _send_message(
-                    bot, chat_id,
-                    "📝 <b>Lyrics</b>\n\nSend me a song title.\nExample: /lyrics imagine dragons believer",
-                    reply_markup=_keyboard([[_cb_button("⬅️ Back", "cb:menu")]]),
-                )
-            elif data == "cb:status":
-                await _safe("handle_status", handle_status(bot, chat_id))
-            elif data == "cb:sources":
-                await _safe("handle_sources", handle_sources(bot, chat_id))
-            elif data == "cb:settings":
-                await _safe("handle_settings", handle_settings(bot, chat_id, user))
-            elif data == "cb:settings:notify":
-                await _safe("handle_notify", handle_notify(bot, chat_id, user))
-            elif data == "cb:settings:lang":
-                await _safe("handle_language", handle_language(bot, chat_id, user))
-            elif data == "cb:playlist":
-                await _safe("handle_playlist", handle_playlist(bot, chat_id, user))
-            elif data == "cb:history":
-                await _safe("handle_history", handle_history(bot, chat_id, user))
-            elif data == "cb:admin":
-                await _safe("handle_admin", handle_admin(bot, chat_id, user))
-            elif data == "cb:admin:users":
-                await _send_message(bot, chat_id, "👥 User management via API: GET /v1/users")
-            elif data == "cb:admin:stats":
-                await _send_message(bot, chat_id, "📊 Stats via API: GET /v1/stats/global")
-            elif data == "cb:admin:broadcast":
-                await _send_message(bot, chat_id, "📢 Use /broadcast <message>")
-            elif data == "cb:admin:keys":
-                await _send_message(bot, chat_id, "🔑 All keys via API: GET /v1/web/owner/keys")
-            elif data == "cb:admin:system":
-                await _send_message(bot, chat_id, "⚙️ System status via API: GET /health")
-            elif data.startswith("cb:dl:"):
-                url = data[5:]
-                await _safe("handle_download_url", handle_download_url(bot, chat_id, user, url))
-            elif data.startswith("cb:tier:"):
-                tier = data.split(":")[2]
-                await _send_message(bot, chat_id, f"Tier {tier} — use /buy to upgrade to Pro.")
-            elif data.startswith("cb:lang:"):
-                lang = data.split(":")[2]
-                await _safe("handle_language", handle_language(bot, chat_id, user, lang))
-            else:
-                await _safe("handle_start", handle_start(bot, chat_id, user, message_id))
+async def cmd_help(message: Message):
+    await handle_help(message.bot, message.chat.id, _extract_user_from_message(message))
 
-        # --- Inline query ---
-        elif "inline_query" in update:
-            iq = update["inline_query"]
-            await _safe("handle_inline_query", handle_inline_query(bot, iq["id"], iq.get("query", ""), iq.get("from", {}).get("id", 0)))
 
-        # --- Pre-checkout query (Stars payment) ---
-        elif "pre_checkout_query" in update:
-            pcq = update["pre_checkout_query"]
-            await _answer_pre_checkout_query(bot, pcq["id"], ok=True)
+async def cmd_tier(message: Message):
+    await handle_tier(message.bot, message.chat.id, _extract_user_from_message(message))
 
-        # --- Chat member (bot added to group) ---
-        elif "my_chat_member" in update:
-            pass
 
-        # --- Channel post ---
-        elif "channel_post" in update:
-            pass
+async def cmd_search(message: Message):
+    args = message.text[len("/search"):].strip() if message.text and message.text.startswith("/search") else ""
+    await handle_search(message.bot, message.chat.id, _extract_user_from_message(message), args or None)
 
-    except Exception as exc:
-        logger.exception(f"process_update top-level error: {exc}")
-        await _send_owner_log(
-            bot,
-            "ERROR",
-            "process_update top-level error",
-            exc=exc,
+
+async def cmd_download(message: Message):
+    args = message.text[len("/download"):].strip() if message.text and message.text.startswith("/download") else ""
+    if not args:
+        await _send_message(
+            message.bot, message.chat.id,
+            "📥 <b>Download</b>\n\nSend me a URL to download.\nExample: /download https://youtu.be/...",
+            reply_markup=_keyboard([[_cb_button("⬅️ Back", "cb:menu")]]),
         )
+    else:
+        await handle_download_url(message.bot, message.chat.id, _extract_user_from_message(message), args)
+
+
+async def cmd_info(message: Message):
+    args = message.text[len("/info"):].strip() if message.text and message.text.startswith("/info") else ""
+    await handle_info(message.bot, message.chat.id, _extract_user_from_message(message), args or None)
+
+
+async def cmd_lyrics(message: Message):
+    args = message.text[len("/lyrics"):].strip() if message.text and message.text.startswith("/lyrics") else ""
+    await handle_lyrics(message.bot, message.chat.id, _extract_user_from_message(message), args or None)
+
+
+async def cmd_key(message: Message):
+    await handle_keys(message.bot, message.chat.id, _extract_user_from_message(message))
+
+
+async def cmd_createkey(message: Message):
+    await handle_create_key(message.bot, message.chat.id, _extract_user_from_message(message))
+
+
+async def cmd_buy(message: Message):
+    await handle_buy(message.bot, message.chat.id, _extract_user_from_message(message))
+
+
+async def cmd_status(message: Message):
+    await handle_status(message.bot, message.chat.id)
+
+
+async def cmd_sources(message: Message):
+    await handle_sources(message.bot, message.chat.id)
+
+
+async def cmd_settings(message: Message):
+    await handle_settings(message.bot, message.chat.id, _extract_user_from_message(message))
+
+
+async def cmd_playlist(message: Message):
+    await handle_playlist(message.bot, message.chat.id, _extract_user_from_message(message))
+
+
+async def cmd_history(message: Message):
+    await handle_history(message.bot, message.chat.id, _extract_user_from_message(message))
+
+
+async def cmd_notify(message: Message):
+    await handle_notify(message.bot, message.chat.id, _extract_user_from_message(message))
+
+
+async def cmd_feedback(message: Message):
+    args = message.text[len("/feedback"):].strip() if message.text and message.text.startswith("/feedback") else ""
+    await handle_feedback(message.bot, message.chat.id, _extract_user_from_message(message), args or None)
+
+
+async def cmd_language(message: Message):
+    args = message.text[len("/language"):].strip() if message.text and message.text.startswith("/language") else ""
+    await handle_language(message.bot, message.chat.id, _extract_user_from_message(message), args or None)
+
+
+async def cmd_admin(message: Message):
+    await handle_admin(message.bot, message.chat.id, _extract_user_from_message(message))
+
+
+async def cmd_broadcast(message: Message):
+    args = message.text[len("/broadcast"):].strip() if message.text and message.text.startswith("/broadcast") else ""
+    await handle_broadcast(message.bot, message.chat.id, _extract_user_from_message(message), args or None)
+
+
+async def cmd_users(message: Message):
+    await handle_users(message.bot, message.chat.id, _extract_user_from_message(message))
+
+
+async def cmd_stats(message: Message):
+    await handle_stats(message.bot, message.chat.id, _extract_user_from_message(message))
+
+
+# --- Callback query adapters ---
+
+async def cb_menu(callback: CallbackQuery):
+    await callback.answer()
+    await handle_start(callback.bot, callback.message.chat.id, _extract_user_from_callback(callback), callback.message.message_id)
+
+
+async def cb_help(callback: CallbackQuery):
+    await callback.answer()
+    await handle_help(callback.bot, callback.message.chat.id, _extract_user_from_callback(callback))
+
+
+async def cb_tier(callback: CallbackQuery):
+    await callback.answer()
+    await handle_tier(callback.bot, callback.message.chat.id, _extract_user_from_callback(callback))
+
+
+async def cb_keys(callback: CallbackQuery):
+    await callback.answer()
+    await handle_keys(callback.bot, callback.message.chat.id, _extract_user_from_callback(callback))
+
+
+async def cb_key_create(callback: CallbackQuery):
+    await callback.answer()
+    await handle_create_key(callback.bot, callback.message.chat.id, _extract_user_from_callback(callback))
+
+
+async def cb_key_revoke(callback: CallbackQuery):
+    await callback.answer()
+    await handle_keys(callback.bot, callback.message.chat.id, _extract_user_from_callback(callback))
+    await _send_message(
+        callback.bot, callback.message.chat.id,
+        "🗑️ <b>Revoke Key</b>\n\nUse the API to revoke a key:\nDELETE /v1/keys/{key_id}\nOr contact support.",
+        reply_markup=keys_keyboard(),
+    )
+
+
+async def cb_key_rotate(callback: CallbackQuery):
+    await callback.answer()
+    await _send_message(
+        callback.bot, callback.message.chat.id,
+        "🔄 <b>Rotate Key</b>\n\nUse the API to rotate a key:\nPATCH /v1/keys/{key_id}?action=rotate\nOr contact support.",
+        reply_markup=keys_keyboard(),
+    )
+
+
+async def cb_buy(callback: CallbackQuery):
+    await callback.answer()
+    await handle_buy(callback.bot, callback.message.chat.id, _extract_user_from_callback(callback))
+
+
+async def cb_search(callback: CallbackQuery):
+    await callback.answer()
+    await handle_search(callback.bot, callback.message.chat.id, _extract_user_from_callback(callback), None)
+
+
+async def cb_download(callback: CallbackQuery):
+    await callback.answer()
+    await _send_message(
+        callback.bot, callback.message.chat.id,
+        "📥 <b>Download</b>\n\nSend me a URL to download.\nExample: /download https://youtu.be/...",
+        reply_markup=_keyboard([[_cb_button("⬅️ Back", "cb:menu")]]),
+    )
+
+
+async def cb_info(callback: CallbackQuery):
+    await callback.answer()
+    await _send_message(
+        callback.bot, callback.message.chat.id,
+        "🎵 <b>Info</b>\n\nSend me a URL or search query.\nExample: /info https://youtu.be/...",
+        reply_markup=_keyboard([[_cb_button("⬅️ Back", "cb:menu")]]),
+    )
+
+
+async def cb_lyrics(callback: CallbackQuery):
+    await callback.answer()
+    await _send_message(
+        callback.bot, callback.message.chat.id,
+        "📝 <b>Lyrics</b>\n\nSend me a song title.\nExample: /lyrics imagine dragons believer",
+        reply_markup=_keyboard([[_cb_button("⬅️ Back", "cb:menu")]]),
+    )
+
+
+async def cb_status(callback: CallbackQuery):
+    await callback.answer()
+    await handle_status(callback.bot, callback.message.chat.id)
+
+
+async def cb_sources(callback: CallbackQuery):
+    await callback.answer()
+    await handle_sources(callback.bot, callback.message.chat.id)
+
+
+async def cb_settings(callback: CallbackQuery):
+    await callback.answer()
+    await handle_settings(callback.bot, callback.message.chat.id, _extract_user_from_callback(callback))
+
+
+async def cb_settings_notify(callback: CallbackQuery):
+    await callback.answer()
+    await handle_notify(callback.bot, callback.message.chat.id, _extract_user_from_callback(callback))
+
+
+async def cb_settings_lang(callback: CallbackQuery):
+    await callback.answer()
+    await handle_language(callback.bot, callback.message.chat.id, _extract_user_from_callback(callback))
+
+
+async def cb_playlist(callback: CallbackQuery):
+    await callback.answer()
+    await handle_playlist(callback.bot, callback.message.chat.id, _extract_user_from_callback(callback))
+
+
+async def cb_history(callback: CallbackQuery):
+    await callback.answer()
+    await handle_history(callback.bot, callback.message.chat.id, _extract_user_from_callback(callback))
+
+
+async def cb_admin(callback: CallbackQuery):
+    await callback.answer()
+    await handle_admin(callback.bot, callback.message.chat.id, _extract_user_from_callback(callback))
+
+
+async def cb_admin_users(callback: CallbackQuery):
+    await callback.answer()
+    await _send_message(callback.bot, callback.message.chat.id, "👥 User management via API: GET /v1/users")
+
+
+async def cb_admin_stats(callback: CallbackQuery):
+    await callback.answer()
+    await _send_message(callback.bot, callback.message.chat.id, "📊 Stats via API: GET /v1/stats/global")
+
+
+async def cb_admin_broadcast(callback: CallbackQuery):
+    await callback.answer()
+    await _send_message(callback.bot, callback.message.chat.id, "📢 Use /broadcast <message>")
+
+
+async def cb_admin_keys(callback: CallbackQuery):
+    await callback.answer()
+    await _send_message(callback.bot, callback.message.chat.id, "🔑 All keys via API: GET /v1/web/owner/keys")
+
+
+async def cb_admin_system(callback: CallbackQuery):
+    await callback.answer()
+    await _send_message(callback.bot, callback.message.chat.id, "⚙️ System status via API: GET /health")
+
+
+async def cb_download_url(callback: CallbackQuery):
+    await callback.answer()
+    url = callback.data[5:]  # strip "cb:dl:"
+    await handle_download_url(callback.bot, callback.message.chat.id, _extract_user_from_callback(callback), url)
+
+
+async def cb_tier_select(callback: CallbackQuery):
+    await callback.answer()
+    tier = callback.data.split(":")[2]
+    await _send_message(callback.bot, callback.message.chat.id, f"Tier {tier} — use /buy to upgrade to Pro.")
+
+
+async def cb_lang_select(callback: CallbackQuery):
+    await callback.answer()
+    lang = callback.data.split(":")[2]
+    await handle_language(callback.bot, callback.message.chat.id, _extract_user_from_callback(callback), lang)
+
+
+# --- Successful payment handler ---
+
+async def successful_payment_handler(message: Message):
+    payment = message.successful_payment
+    amount = payment.total_amount
+    currency = payment.currency
+    user = _get_or_create_user(message.from_user.id, message.from_user.username or "", message.from_user.first_name or "")
+    _set_user_field(message.from_user.id, "tier", "pro")
+    _set_user_field(message.from_user.id, "stars_balance", user.get("stars_balance", 0) + amount)
+    _set_user_field(message.from_user.id, "lifetime_stars", user.get("lifetime_stars", 0) + amount)
+    _set_user_field(message.from_user.id, "scopes", ["read", "search", "download"])
+    await _send_message(
+        message.bot,
+        message.chat.id,
+        "🎉 <b>Payment Successful!</b>\n\n"
+        f"Amount: {amount} {currency}\n"
+        "Tier upgraded to: <b>PRO</b>\n\n"
+        "Your API keys now have Pro limits.\n"
+        "Use /key to view your keys.",
+    )
+
+
+# ---------------------------------------------------------------------------
+# Register all handlers with Dispatcher
+# ---------------------------------------------------------------------------
+
+def _register_handlers() -> None:
+    # Commands
+    dp.message.register(cmd_start, Command("start"))
+    dp.message.register(cmd_help, Command("help"))
+    dp.message.register(cmd_tier, Command("tier"))
+    dp.message.register(cmd_search, Command("search"))
+    dp.message.register(cmd_download, Command("download"))
+    dp.message.register(cmd_info, Command("info"))
+    dp.message.register(cmd_lyrics, Command("lyrics"))
+    dp.message.register(cmd_key, Command("key"))
+    dp.message.register(cmd_createkey, Command("createkey"))
+    dp.message.register(cmd_buy, Command("buy"))
+    dp.message.register(cmd_status, Command("status"))
+    dp.message.register(cmd_sources, Command("sources"))
+    dp.message.register(cmd_settings, Command("settings"))
+    dp.message.register(cmd_playlist, Command("playlist"))
+    dp.message.register(cmd_history, Command("history"))
+    dp.message.register(cmd_notify, Command("notify"))
+    dp.message.register(cmd_feedback, Command("feedback"))
+    dp.message.register(cmd_language, Command("language"))
+    dp.message.register(cmd_admin, Command("admin"))
+    dp.message.register(cmd_broadcast, Command("broadcast"))
+    dp.message.register(cmd_users, Command("users"))
+    dp.message.register(cmd_stats, Command("stats"))
+
+    # Successful payment (must be registered to catch payment messages)
+    dp.message.register(successful_payment_handler, F.successful_payment)
+
+    # Callback queries
+    dp.callback_query.register(cb_menu, F.data == "cb:menu")
+    dp.callback_query.register(cb_help, F.data == "cb:help")
+    dp.callback_query.register(cb_tier, F.data == "cb:tier")
+    dp.callback_query.register(cb_keys, F.data == "cb:keys")
+    dp.callback_query.register(cb_key_create, F.data == "cb:key:create")
+    dp.callback_query.register(cb_key_revoke, F.data == "cb:key:revoke")
+    dp.callback_query.register(cb_key_rotate, F.data == "cb:key:rotate")
+    dp.callback_query.register(cb_buy, F.data == "cb:buy")
+    dp.callback_query.register(cb_search, F.data == "cb:search")
+    dp.callback_query.register(cb_download, F.data == "cb:download")
+    dp.callback_query.register(cb_info, F.data == "cb:info")
+    dp.callback_query.register(cb_lyrics, F.data == "cb:lyrics")
+    dp.callback_query.register(cb_status, F.data == "cb:status")
+    dp.callback_query.register(cb_sources, F.data == "cb:sources")
+    dp.callback_query.register(cb_settings, F.data == "cb:settings")
+    dp.callback_query.register(cb_settings_notify, F.data == "cb:settings:notify")
+    dp.callback_query.register(cb_settings_lang, F.data == "cb:settings:lang")
+    dp.callback_query.register(cb_playlist, F.data == "cb:playlist")
+    dp.callback_query.register(cb_history, F.data == "cb:history")
+    dp.callback_query.register(cb_admin, F.data == "cb:admin")
+    dp.callback_query.register(cb_admin_users, F.data == "cb:admin:users")
+    dp.callback_query.register(cb_admin_stats, F.data == "cb:admin:stats")
+    dp.callback_query.register(cb_admin_broadcast, F.data == "cb:admin:broadcast")
+    dp.callback_query.register(cb_admin_keys, F.data == "cb:admin:keys")
+    dp.callback_query.register(cb_admin_system, F.data == "cb:admin:system")
+    dp.callback_query.register(cb_download_url, F.data.startswith("cb:dl:"))
+    dp.callback_query.register(cb_tier_select, F.data.startswith("cb:tier:"))
+    dp.callback_query.register(cb_lang_select, F.data.startswith("cb:lang:"))
+
+    # Inline query
+    dp.inline_query.register(handle_inline_query)
+
+    # Pre-checkout query
+    dp.pre_checkout_query.register(lambda bot, pre_checkout_query: _answer_pre_checkout_query(bot, pre_checkout_query.id, ok=True))
+
+    logger.info("All Telegram bot handlers registered with Dispatcher")
+
+
+# Register on import
+_register_handlers()
 
 
 # ---------------------------------------------------------------------------
@@ -1267,13 +1407,38 @@ async def set_bot_commands() -> None:
     logger.info("Bot commands set")
 
 
+# ---------------------------------------------------------------------------
+# Process single update (for webhook mode)
+# ---------------------------------------------------------------------------
+
+async def process_update(update: dict) -> None:
+    """Route a single Telegram update via Dispatcher (webhook mode)."""
+    bot = await get_bot()
+    if not bot:
+        return
+    try:
+        await dp.feed_update(bot, Update.model_validate(update))
+    except Exception as exc:
+        logger.exception(f"process_update error: {exc}")
+        await _send_owner_log(
+            bot,
+            "ERROR",
+            "process_update error",
+            exc=exc,
+        )
+
+
+# ---------------------------------------------------------------------------
+# Long-polling entry point (standalone bot mode)
+# ---------------------------------------------------------------------------
+
 async def start_bot_polling() -> None:
-    """Long-polling entry point (for standalone bot mode).
+    """Long-polling entry point using aiogram Dispatcher.
 
     Telegram only allows ONE getUpdates connection per bot token.
-    If another instance is already polling, we get a Conflict error.
-    This handler never crashes — it retries indefinitely with
-    exponential backoff until the conflict clears.
+    If another instance is already polling, aiogram's start_polling
+    will retry internally.  We add a startup delay and webhook
+    clearance to minimize conflicts on restart.
     """
     global _polling_active
 
@@ -1302,34 +1467,14 @@ async def start_bot_polling() -> None:
             )
             await asyncio.sleep(2)
 
-    offset = 0
     logger.info("Telegram bot polling started")
-    conflict_backoff = 5
     try:
-        while True:
-            try:
-                updates = await bot.get_updates(offset=offset, timeout=30, limit=100)
-                conflict_backoff = 5  # reset on success
-                for upd in updates:
-                    offset = upd.update_id + 1
-                    await process_update(upd.model_dump())
-            except Exception as exc:
-                msg = str(exc)
-                if "Conflict" in msg or "terminated by other getUpdates" in msg:
-                    # Never crash on conflict — retry indefinitely with backoff
-                    logger.warning(
-                        "Telegram polling conflict (another instance may be running). "
-                        f"Retrying in {conflict_backoff}s..."
-                    )
-                    try:
-                        await bot.delete_webhook(drop_pending_updates=True)
-                    except Exception:
-                        pass
-                    await asyncio.sleep(conflict_backoff)
-                    conflict_backoff = min(conflict_backoff * 2, 600)
-                else:
-                    logger.error(f"Polling error: {exc}")
-                    await asyncio.sleep(5)
+        await dp.start_polling(
+            bot,
+            allowed_updates=dp.resolve_used_update_types(),
+            drop_pending_updates=True,
+            polling_timeout=30,
+        )
     except asyncio.CancelledError:
         logger.info("Telegram bot polling cancelled (shutdown)")
         raise
