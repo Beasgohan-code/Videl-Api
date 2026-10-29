@@ -337,6 +337,10 @@ function el(tag, props = {}, children = []) {
             e.addEventListener(k.slice(2).toLowerCase(), v);
         } else if (k === "style" && typeof v === "object") {
             Object.assign(e.style, v);
+        } else if (k === "children") {
+            (v || []).forEach((c) => {
+                if (c) e.appendChild(typeof c === "string" ? document.createTextNode(c) : c);
+            });
         } else {
             e.setAttribute(k, v);
         }
@@ -1470,7 +1474,7 @@ function nav(view) {
 }
 
 function getMainButtonLabel(view) {
-    switch (view) {
+    switch (currentView) {
         case "auth": return "Sign in";
         case "dashboard": return "Create Key";
         case "search": return "Search";
@@ -1568,7 +1572,7 @@ async function render() {
     app.appendChild(content);
 
     // Render view
-    switch (view) {
+    switch (currentView) {
         case "auth":
             renderAuthScreen(content, (user) => {
                 currentUser = user;
@@ -1811,3 +1815,17 @@ init();
 // Expose for debugging
 window.__videl_nav = nav;
 window.__videl_currentUser = currentUser;
+
+// Error fallback: if anything above throws, show an error instead of blank screen
+window.addEventListener("error", (e) => {
+    const app = document.getElementById("app");
+    if (!app) return;
+    app.innerHTML = `
+        <div style="padding:40px;text-align:center;font-family:sans-serif;">
+            <h2 style="color:#d63031;">Videl-Api</h2>
+            <p style="color:#666;">Something went wrong loading the app.</p>
+            <p style="font-size:0.9rem;color:#999;">${e.message || "Unknown error"}</p>
+            <button onclick="location.reload()" style="padding:10px 20px;background:#0088cc;color:#fff;border:none;border-radius:8px;cursor:pointer;">Reload</button>
+        </div>
+    `;
+});
